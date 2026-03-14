@@ -1,0 +1,43 @@
+# Secrets and env
+.env
+.env.*
+!.env.example
+*.pem
+
+# Python
+backend/.venv
+backend/__pycache__
+backend/**/__pycache__
+**/*.pyc
+**/*.pyo
+backend/.pytest_cache
+backend/.ruff_cache
+backend/.mypy_cache
+backend/*.egg-info/
+
+# Node / Next.js
+frontend/node_modules
+frontend/.next
+frontend/.cache
+
+# Git and IDE
+.git
+.gitignore
+.cursor
+.vscode
+.devcontainer
+*.swp
+*.swo
+*~
+
+# Docs and tooling (not needed in image)
+*.md
+!CHANGELOG.md
+Makefile
+docker-compose*.yml
+Dockerfile*
+
+# Test and build artifacts
+backend/tests/
+dist/
+build/

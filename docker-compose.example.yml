@@ -1,0 +1,60 @@
+services:
+  backend:
+    image: tanjd/bookshelf-backend:latest
+    container_name: bookshelf-backend
+    restart: unless-stopped
+    # Port 8000 is only needed if you want direct API access for debugging.
+    # ports:
+    #   - "8000:8000"
+    volumes:
+      # TrueNAS: use an absolute dataset path, e.g. /mnt/tank/bookshelf
+      # Local:   ./data works fine
+      - /mnt/tank/bookshelf:/app/data
+    environment:
+      - ENV=prd
+      - PORT=8000
+      - DB_PATH=/app/data/bookshelf.db
+      - JWT_SECRET=changeme-use-a-long-random-string
+      - CORS_ORIGINS=http://localhost:3000
+      - RESEND_API_KEY=
+      - EMAIL_FROM=noreply@yourdomain.com
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    image: tanjd/bookshelf-frontend:latest
+    container_name: bookshelf-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode < 400 ? 0 : 1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

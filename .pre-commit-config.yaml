@@ -1,0 +1,61 @@
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Meta hooks – validate this config
+  - repo: meta
+    hooks:
+      - id: check-useless-excludes
+
+  # General pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-case-conflict
+      - id: mixed-line-ending
+
+  # GHA workflow schema validation
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: "0.28.0"
+    hooks:
+      - id: check-github-workflows
+
+  # Go formatting, vetting, and linting (backend/)
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go fmt
+        entry: bash -c 'cd backend && gofmt -l -w .'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'cd backend && go vet ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c 'cd backend && golangci-lint run ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+  # Conventional commits validation
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: []
