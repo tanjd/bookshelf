@@ -9,7 +9,7 @@ MAKEFLAGS += --no-print-directory
 .PHONY: help setup clean install-tools \
         backend-run frontend-run dev \
         migrate-new \
-        test lint build check-ci \
+        test lint lint-backend lint-frontend build check-ci \
         docker-build docker-run docker-push
 
 .DEFAULT_GOAL := help
@@ -58,8 +58,13 @@ migrate-new: ## Create a new migration pair (usage: make migrate-new NAME=add_fo
 test: ## Run Go tests
 	cd backend && go test ./...
 
-lint: ## Lint Go code with golangci-lint
+lint-backend: ## Lint Go code with golangci-lint
 	cd backend && golangci-lint run ./...
+
+lint-frontend: ## Lint frontend with ESLint
+	cd frontend && npm run lint
+
+lint: lint-backend lint-frontend ## Lint backend (Go) and frontend (ESLint)
 
 build: ## Build Go binary
 	cd backend && go build -o bin/server ./cmd/server

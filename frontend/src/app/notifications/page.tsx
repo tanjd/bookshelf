@@ -38,7 +38,6 @@ export default function NotificationsPage() {
       return
     }
     loadNotifications(1)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router])
 
   async function loadNotifications(p: number) {

@@ -57,7 +57,6 @@ export default function MyRequestsPage() {
       return
     }
     loadRequests(1)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router])
 
   async function loadRequests(p: number) {
@@ -77,7 +76,7 @@ export default function MyRequestsPage() {
   function toggleExpand(id: number) {
     setExpanded((prev) => {
       const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
+      if (next.has(id)) { next.delete(id) } else { next.add(id) }
       return next
     })
   }

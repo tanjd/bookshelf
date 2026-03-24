@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import { Plus, Pencil, Trash2, X, Check, BookOpen, ArrowRightLeft } from "lucide-react"
 import { api } from "@/lib/api"
-import type { User, Copy } from "@/lib/types"
+import type { Copy } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -51,7 +51,6 @@ const statusVariant: Record<string, 'success' | 'secondary' | 'destructive' | 'o
 
 export default function MyBooksPage() {
   const router = useRouter()
-  const [currentUser, setCurrentUser] = useState<User | null>(null)
   const [bookGroups, setBookGroups] = useState<BookGroup[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
@@ -82,8 +81,7 @@ export default function MyBooksPage() {
     const stored = localStorage.getItem("bookshelf_user")
     if (stored) {
       try {
-        const user = JSON.parse(stored)
-        setCurrentUser(user)
+        JSON.parse(stored) // validate JSON
         loadMyCopies()
       } catch {
         router.push("/login")
@@ -91,10 +89,9 @@ export default function MyBooksPage() {
     } else {
       router.push("/login")
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router])
 
-  async function loadMyCopies(_userId?: number) {
+  async function loadMyCopies() {
     setLoading(true)
     setError("")
     try {

@@ -9,6 +9,9 @@ linters:
           disabled: true
         - name: package-comments
           disabled: true
+  exclusions:
+    paths:
+      - vendor
   enable:
     - asciicheck
     - bodyclose
@@ -29,11 +32,10 @@ formatters:
   enable:
     - gofmt
     - goimports
-exclusions:
-  generated: lax
-  paths:
-    - vendor
-    - third_party$
-    - builtin$
-    - examples$
-    - build$
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - build$

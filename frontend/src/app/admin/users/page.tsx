@@ -25,7 +25,6 @@ export default function AdminUsersPage() {
       } catch { /* ignore */ }
     }
     loadUsers(1)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function loadUsers(p: number) {

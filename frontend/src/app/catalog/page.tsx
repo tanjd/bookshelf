@@ -64,7 +64,6 @@ export default function CatalogPage() {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, sort, availableOnly])
 
   function handlePageChange(p: number) {
