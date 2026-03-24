@@ -7,7 +7,9 @@ import { toast } from "sonner"
 import { ArrowLeft } from "lucide-react"
 import { api } from "@/lib/api"
 import type { Book, User, Copy } from "@/lib/types"
+import { Input } from "@/components/ui/input"
 import { CopyCard } from "@/components/CopyCard"
+import { WaitlistButton } from "@/components/WaitlistButton"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -32,6 +34,7 @@ export default function BookDetailPage() {
   // Request dialog state
   const [selectedCopy, setSelectedCopy] = useState<Copy | null>(null)
   const [requestMessage, setRequestMessage] = useState("")
+  const [expectedReturnDate, setExpectedReturnDate] = useState("")
   const [requesting, setRequesting] = useState(false)
 
   useEffect(() => {
@@ -55,21 +58,21 @@ export default function BookDetailPage() {
 
   async function handleRequest() {
     if (!selectedCopy) return
+    if (selectedCopy.return_date_required && !expectedReturnDate) {
+      toast.error("Return date is required by the sharer")
+      return
+    }
     setRequesting(true)
     try {
-      const req = await api.createLoanRequest({
+      await api.createLoanRequest({
         copy_id: selectedCopy.id,
         message: requestMessage.trim() || undefined,
+        expected_return_date: selectedCopy.return_date_required ? expectedReturnDate : undefined,
       })
-      // Store request ID so My Requests page can find it
-      const stored = localStorage.getItem("bookshelf_request_ids")
-      const ids: number[] = stored ? JSON.parse(stored) : []
-      ids.push(req.id)
-      localStorage.setItem("bookshelf_request_ids", JSON.stringify(ids))
-
       toast.success("Borrow request sent!")
       setSelectedCopy(null)
       setRequestMessage("")
+      setExpectedReturnDate("")
       // Refresh book to update copy status
       const updated = await api.getBook(bookId)
       setBook(updated)
@@ -176,6 +179,9 @@ export default function BookDetailPage() {
               const canRequest =
                 copy.status === 'available' && currentUser && !isOwner
 
+              const isLoaned = copy.status === 'loaned'
+              const canWaitlist = isLoaned && currentUser && !isOwner
+
               return (
                 <CopyCard
                   key={copy.id}
@@ -188,6 +194,8 @@ export default function BookDetailPage() {
                       >
                         Request to Borrow
                       </Button>
+                    ) : canWaitlist ? (
+                      <WaitlistButton copyId={copy.id} />
                     ) : isOwner ? (
                       <span className="text-xs text-muted-foreground italic">Your copy</span>
                     ) : null
@@ -200,7 +208,7 @@ export default function BookDetailPage() {
       </div>
 
       {/* Request dialog */}
-      <Dialog open={!!selectedCopy} onOpenChange={(open) => !open && setSelectedCopy(null)}>
+      <Dialog open={!!selectedCopy} onOpenChange={(open) => { if (!open) { setSelectedCopy(null); setExpectedReturnDate("") } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Request to Borrow</DialogTitle>
@@ -220,6 +228,20 @@ export default function BookDetailPage() {
               onChange={(e) => setRequestMessage(e.target.value)}
             />
           </div>
+          {selectedCopy?.return_date_required && (
+            <div className="flex flex-col gap-2">
+              <label htmlFor="return-date" className="text-sm font-medium">
+                Expected return date <span className="text-destructive">*</span>
+              </label>
+              <Input
+                id="return-date"
+                type="date"
+                required
+                value={expectedReturnDate}
+                onChange={(e) => setExpectedReturnDate(e.target.value)}
+              />
+            </div>
+          )}
           <DialogFooter showCloseButton>
             <Button onClick={handleRequest} disabled={requesting}>
               {requesting ? "Sending…" : "Send Request"}

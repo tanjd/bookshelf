@@ -13,10 +13,12 @@ import (
 type contextKey string
 
 const userIDKey contextKey = "userID"
+const roleKey contextKey = "role"
 
 // JWTClaims are the custom claims embedded in every issued token.
 type JWTClaims struct {
-	UserID uint `json:"user_id"`
+	UserID uint   `json:"user_id"`
+	Role   string `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -25,8 +27,8 @@ type JWTClaims struct {
 var ErrUnauthorized = errors.New("authentication required")
 
 // SetAuth returns a middleware that parses the Bearer JWT from the
-// Authorization header and stores the user ID in the request context when
-// valid. Requests with a missing or invalid token are not rejected — routes
+// Authorization header and stores the user ID and role in the request context
+// when valid. Requests with a missing or invalid token are not rejected — routes
 // that require authentication should call GetRequiredUserID.
 func SetAuth(secret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -43,6 +45,7 @@ func SetAuth(secret string) func(http.Handler) http.Handler {
 				})
 				if err == nil && token.Valid {
 					ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
+					ctx = context.WithValue(ctx, roleKey, claims.Role)
 					r = r.WithContext(ctx)
 				}
 			}
@@ -67,3 +70,27 @@ func GetRequiredUserID(ctx context.Context) (uint, error) {
 	}
 	return v, nil
 }
+
+// GetUserRole retrieves the authenticated user's role from the context.
+// Returns empty string if no valid JWT was present on the request.
+func GetUserRole(ctx context.Context) string {
+	v, _ := ctx.Value(roleKey).(string)
+	return v
+}
+
+// RequireAdmin returns ErrUnauthorized if no token is present or ErrForbidden
+// if the token's role is not "admin".
+func RequireAdmin(ctx context.Context) error {
+	_, err := GetRequiredUserID(ctx)
+	if err != nil {
+		return ErrUnauthorized
+	}
+	if GetUserRole(ctx) != "admin" {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// ErrForbidden is returned by RequireAdmin when the user is authenticated but
+// lacks admin privileges.
+var ErrForbidden = errors.New("forbidden")

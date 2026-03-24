@@ -1,40 +1,54 @@
 "use client"
 
-// TODO: Ideally the backend would expose GET /users/me/loan-requests so we don't need to
-// track request IDs client-side. For now, request IDs submitted from this device are stored
-// in localStorage under the key `bookshelf_request_ids`.
-
-import { useEffect, useState } from "react"
+import { useEffect, useState, Fragment } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
+import Image from "next/image"
 import { toast } from "sonner"
+import { BookOpen, ChevronDown, ChevronRight } from "lucide-react"
 import { api } from "@/lib/api"
 import type { LoanRequest } from "@/lib/types"
 import { ContactReveal } from "@/components/ContactReveal"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Pagination } from "@/components/ui/Pagination"
 import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-  CardFooter,
-} from "@/components/ui/card"
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 
-const statusVariant: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
+const PAGE_SIZE = 20
+
+const statusVariant: Record<string, 'success' | 'secondary' | 'destructive' | 'outline'> = {
   pending: 'secondary',
-  accepted: 'default',
+  accepted: 'success',
   rejected: 'destructive',
   cancelled: 'outline',
   returned: 'outline',
 }
 
+const conditionVariant: Record<string, 'default' | 'secondary' | 'outline'> = {
+  good: 'default',
+  fair: 'secondary',
+  worn: 'outline',
+}
+
+function hasExpandContent(req: LoanRequest): boolean {
+  return !!(req.message || req.status === 'accepted')
+}
+
 export default function MyRequestsPage() {
   const router = useRouter()
   const [requests, setRequests] = useState<LoanRequest[]>([])
+  const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [cancelling, setCancelling] = useState<number | null>(null)
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
   useEffect(() => {
     const token = localStorage.getItem("bookshelf_token")
@@ -42,37 +56,36 @@ export default function MyRequestsPage() {
       router.push("/login")
       return
     }
-    loadRequests()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadRequests(1)
   }, [router])
 
-  async function loadRequests() {
+  async function loadRequests(p: number) {
     setLoading(true)
-    const stored = localStorage.getItem("bookshelf_request_ids")
-    const ids: number[] = stored ? JSON.parse(stored) : []
-
-    if (ids.length === 0) {
+    try {
+      const data = await api.getMyLoanRequests({ page: p, page_size: PAGE_SIZE })
+      setRequests(data.items)
+      setTotalPages(data.total_pages)
+      setPage(p)
+    } catch {
       setRequests([])
+    } finally {
       setLoading(false)
-      return
     }
+  }
 
-    const results = await Promise.allSettled(ids.map((id) => api.getLoanRequest(id)))
-    const loaded: LoanRequest[] = []
-    for (const r of results) {
-      if (r.status === 'fulfilled') loaded.push(r.value)
-    }
-    // Sort newest first
-    loaded.sort((a, b) => new Date(b.requested_at).getTime() - new Date(a.requested_at).getTime())
-    setRequests(loaded)
-    setLoading(false)
+  function toggleExpand(id: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) { next.delete(id) } else { next.add(id) }
+      return next
+    })
   }
 
   async function handleCancel(requestId: number) {
     setCancelling(requestId)
     try {
-      const updated = await api.updateLoanRequest(requestId, { status: 'cancelled' })
-      setRequests((prev) => prev.map((r) => (r.id === requestId ? updated : r)))
+      await api.updateLoanRequest(requestId, { status: 'cancelled' })
+      await loadRequests(page)
       toast.success("Request cancelled")
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to cancel")
@@ -85,15 +98,15 @@ export default function MyRequestsPage() {
     return (
       <div className="flex flex-col gap-4">
         <div className="h-8 w-40 rounded bg-muted animate-pulse" />
-        {[1, 2].map((i) => (
-          <div key={i} className="h-32 rounded-xl bg-muted animate-pulse" />
+        {[1, 2, 3].map((i) => (
+          <div key={i} className="h-12 rounded bg-muted animate-pulse" />
         ))}
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col gap-6 max-w-2xl">
+    <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-bold">My Requests</h1>
         <p className="text-muted-foreground text-sm mt-1">
@@ -109,76 +122,146 @@ export default function MyRequestsPage() {
           </Link>
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
-          {requests.map((req) => {
-            const bookTitle = req.copy?.book?.title ?? `Copy #${req.copy_id}`
-            const copyCondition = req.copy?.condition ?? ""
-            const loaner = req.copy?.owner
+        <div className="rounded-md border overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-8" />
+                <TableHead>Book</TableHead>
+                <TableHead>Condition</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Requested</TableHead>
+                <TableHead>Return by</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {requests.map((req) => {
+                const bookTitle = req.copy?.book?.title ?? `Copy #${req.copy_id}`
+                const bookAuthor = req.copy?.book?.author
+                const copyCondition = req.copy?.condition ?? ""
+                const loaner = req.copy?.owner
+                const coverUrl = req.copy?.book?.cover_url
+                const expandable = hasExpandContent(req)
+                const isExpanded = expanded.has(req.id)
 
-            return (
-              <Card key={req.id}>
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <CardTitle className="text-base truncate">
-                        {bookTitle}
-                      </CardTitle>
-                      {copyCondition && (
-                        <CardDescription className="capitalize">
-                          Condition: {copyCondition}
-                        </CardDescription>
-                      )}
-                    </div>
-                    <Badge variant={statusVariant[req.status] ?? 'outline'} className="shrink-0">
-                      {req.status}
-                    </Badge>
-                  </div>
-                </CardHeader>
-
-                <CardContent className="flex flex-col gap-3">
-                  {req.message && (
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground mb-1">Your message</p>
-                      <p className="text-sm italic text-muted-foreground border rounded-md p-3 bg-muted/50">
-                        {req.message}
-                      </p>
-                    </div>
-                  )}
-
-                  <p className="text-xs text-muted-foreground">
-                    Requested {new Date(req.requested_at).toLocaleDateString()}
-                  </p>
-
-                  {req.status === 'accepted' && loaner && (
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground mb-2">
-                        Loaner contact
-                      </p>
-                      <ContactReveal
-                        name={loaner.name}
-                        email={loaner.email}
-                        phone={loaner.phone}
-                      />
-                    </div>
-                  )}
-                </CardContent>
-
-                {req.status === 'pending' && (
-                  <CardFooter>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleCancel(req.id)}
-                      disabled={cancelling === req.id}
+                return (
+                  <Fragment key={req.id}>
+                    <TableRow
+                      onClick={expandable ? () => toggleExpand(req.id) : undefined}
+                      className={expandable ? "cursor-pointer" : ""}
                     >
-                      {cancelling === req.id ? "Cancelling…" : "Cancel Request"}
-                    </Button>
-                  </CardFooter>
-                )}
-              </Card>
-            )
-          })}
+                      <TableCell className="w-8 pr-0">
+                        {expandable ? (
+                          isExpanded
+                            ? <ChevronDown className="size-4 text-muted-foreground" />
+                            : <ChevronRight className="size-4 text-muted-foreground" />
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 shrink-0">
+                            {coverUrl ? (
+                              <div className="relative w-8 aspect-[2/3] rounded overflow-hidden">
+                                <Image
+                                  src={coverUrl}
+                                  alt={bookTitle}
+                                  fill
+                                  className="object-cover"
+                                  sizes="32px"
+                                />
+                              </div>
+                            ) : (
+                              <div className="w-8 aspect-[2/3] rounded bg-muted flex items-center justify-center">
+                                <BookOpen className="size-3 text-muted-foreground" />
+                              </div>
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-medium truncate max-w-[200px]">{bookTitle}</p>
+                            {bookAuthor && (
+                              <p className="text-xs text-muted-foreground truncate max-w-[200px]">
+                                {bookAuthor}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {copyCondition ? (
+                          <Badge variant={conditionVariant[copyCondition] ?? 'outline'} className="capitalize">
+                            {copyCondition}
+                          </Badge>
+                        ) : "—"}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={statusVariant[req.status] ?? 'outline'}>
+                          {req.status}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {new Date(req.requested_at).toLocaleDateString()}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {req.expected_return_date
+                          ? new Date(req.expected_return_date).toLocaleDateString()
+                          : "—"}
+                      </TableCell>
+                      <TableCell
+                        className="text-right"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {req.status === 'pending' && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleCancel(req.id)}
+                            disabled={cancelling === req.id}
+                          >
+                            {cancelling === req.id ? "Cancelling…" : "Cancel"}
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+
+                    {expandable && isExpanded && (
+                      <TableRow key={`${req.id}-detail`} className="hover:bg-transparent">
+                        <TableCell colSpan={7} className="py-0 pb-3 px-8">
+                          <div className="flex flex-col gap-3">
+                            {req.message && (
+                              <div>
+                                <p className="text-xs font-medium text-muted-foreground mb-1">Your message</p>
+                                <p className="text-sm italic text-muted-foreground border rounded-md p-3 bg-muted/50">
+                                  {req.message}
+                                </p>
+                              </div>
+                            )}
+                            {req.status === 'accepted' && loaner && (
+                              <div>
+                                <p className="text-xs font-medium text-muted-foreground mb-2">
+                                  Loaner contact
+                                </p>
+                                <ContactReveal
+                                  name={loaner.name}
+                                  email={loaner.email}
+                                  phone={loaner.phone}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </TableBody>
+          </Table>
         </div>
+      )}
+
+      {totalPages > 1 && (
+        <Pagination page={page} totalPages={totalPages} onPageChange={loadRequests} />
       )}
     </div>
   )

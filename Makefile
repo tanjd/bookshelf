@@ -2,13 +2,14 @@ PROJECT_NAME ?= bookshelf
 DOCKER_BACKEND ?= tanjd/$(PROJECT_NAME)-backend:latest
 DOCKER_FRONTEND ?= tanjd/$(PROJECT_NAME)-frontend:latest
 
-GOLANGCI_VERSION ?= v2.1.6
+GOLANGCI_VERSION ?= v2.4.0
 
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help setup install-tools \
+.PHONY: help setup clean install-tools \
         backend-run frontend-run dev \
-        test lint build check-ci \
+        migrate-new \
+        test lint lint-backend lint-frontend build check-ci \
         docker-build docker-run docker-push
 
 .DEFAULT_GOAL := help
@@ -21,10 +22,14 @@ help: ## Show this help message
 setup: ## Install all deps (backend + frontend)
 	cd backend && go mod download
 	cd frontend && npm install
+	pre-commit install
 
-install-tools: ## Install dev tools (golangci-lint)
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-	  | sh -s -- -b $$(go env GOPATH)/bin $(GOLANGCI_VERSION)
+clean: ## Remove build artifacts (.next, backend bin)
+	rm -rf frontend/.next backend/bin
+
+# install-tools: ## Install dev tools (golangci-lint)
+# 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+# 	  | sh -s -- -b $$(go env GOPATH)/bin $(GOLANGCI_VERSION)
 
 backend-run: ## Run Go backend (port 8000)
 	cd backend && go run ./cmd/server
@@ -39,13 +44,27 @@ dev: ## Run backend and frontend concurrently
 	  $(MAKE) frontend-run & \
 	  wait
 
+migrate-new: ## Create a new migration pair (usage: make migrate-new NAME=add_foo_to_bar)
+	@test -n "$(NAME)" || (echo "ERROR: NAME is required. Example: make migrate-new NAME=add_foo_to_bar"; exit 1)
+	@SEQ=$$(ls backend/internal/db/migrations/*.up.sql 2>/dev/null \
+	        | sed 's/.*\/0*//' | sed 's/_.*//' | sort -n | tail -1); \
+	 NEXT=$$(printf "%06d" $$(( $${SEQ:-0} + 1 ))); \
+	 touch "backend/internal/db/migrations/$${NEXT}_$(NAME).up.sql"; \
+	 touch "backend/internal/db/migrations/$${NEXT}_$(NAME).down.sql"; \
+	 echo "Created: $${NEXT}_$(NAME).{up,down}.sql"
+
 ##@ Testing & Quality
 
 test: ## Run Go tests
 	cd backend && go test ./...
 
-lint: ## Lint Go code with golangci-lint
+lint-backend: ## Lint Go code with golangci-lint
 	cd backend && golangci-lint run ./...
+
+lint-frontend: ## Lint frontend with ESLint
+	cd frontend && npm run lint
+
+lint: lint-backend lint-frontend ## Lint backend (Go) and frontend (ESLint)
 
 build: ## Build Go binary
 	cd backend && go build -o bin/server ./cmd/server
@@ -56,7 +75,7 @@ check-ci: lint test build ## Run all checks (used by CI)
 
 docker-build: ## Build backend and frontend Docker images
 	docker build -t bookshelf-backend -f backend/Dockerfile backend
-	docker build -t bookshelf-frontend -f Dockerfile.frontend .
+	docker build -t bookshelf-frontend -f frontend/Dockerfile frontend
 
 docker-run: ## Run via docker compose (requires docker-compose.yml)
 	docker compose up

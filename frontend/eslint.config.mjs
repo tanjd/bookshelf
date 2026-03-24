@@ -13,6 +13,14 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    rules: {
+      // Reading localStorage synchronously in useEffect is the standard
+      // Next.js pattern for client-side auth checks (localStorage is not
+      // available during SSR so the read cannot happen at render time).
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

@@ -6,16 +6,16 @@ import Image from "next/image"
 import { toast } from "sonner"
 import { Search, ArrowLeft, BookPlus } from "lucide-react"
 import { api } from "@/lib/api"
-import type { OLSearchResult } from "@/lib/types"
+import type { BookMetadataResult } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Badge } from "@/components/ui/badge"
 import {
   Card,
   CardHeader,
   CardTitle,
   CardDescription,
   CardContent,
-  CardFooter,
 } from "@/components/ui/card"
 
 type Condition = 'good' | 'fair' | 'worn'
@@ -24,15 +24,18 @@ type Step = 'search' | 'confirm' | 'manual'
 
 interface SelectedBook {
   olKey: string
+  googleBooksId: string
+  source: 'openlibrary' | 'google_books'
   title: string
   author: string
   isbn: string
   coverUrl: string
   description: string
+  publisher: string
+  publishedDate: string
+  pageCount: number
+  language: string
 }
-
-const OL_COVER = (coverId: number) =>
-  `https://covers.openlibrary.org/b/id/${coverId}-M.jpg`
 
 export default function SharePage() {
   const router = useRouter()
@@ -46,32 +49,36 @@ export default function SharePage() {
 
   // --- Step 1: Search ---
   const [query, setQuery] = useState("")
-  const [searchResults, setSearchResults] = useState<OLSearchResult[]>([])
+  const [searchResults, setSearchResults] = useState<BookMetadataResult[]>([])
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState("")
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cacheRef = useRef<Map<string, BookMetadataResult[]>>(new Map())
 
   useEffect(() => {
-    if (!query.trim()) {
+    const normalized = query.trim().toLowerCase()
+    if (normalized.length < 3) {
       setSearchResults([])
       return
     }
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(async () => {
+      if (cacheRef.current.has(normalized)) {
+        setSearchResults(cacheRef.current.get(normalized)!)
+        return
+      }
       setSearching(true)
       setSearchError("")
       try {
-        const url = `https://openlibrary.org/search.json?q=${encodeURIComponent(query)}&fields=key,title,author_name,isbn,cover_i&limit=10`
-        const res = await fetch(url)
-        if (!res.ok) throw new Error("Open Library search failed")
-        const data = await res.json()
-        setSearchResults(data.docs ?? [])
+        const results = await api.searchMetadata(normalized)
+        cacheRef.current.set(normalized, results)
+        setSearchResults(results)
       } catch (err) {
         setSearchError(err instanceof Error ? err.message : "Search failed")
       } finally {
         setSearching(false)
       }
-    }, 300)
+    }, 500)
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
@@ -81,33 +88,36 @@ export default function SharePage() {
   const [selected, setSelected] = useState<SelectedBook | null>(null)
   const [condition, setCondition] = useState<Condition>('good')
   const [notes, setNotes] = useState("")
+  const [autoApprove, setAutoApprove] = useState(false)
+  const [returnDateRequired, setReturnDateRequired] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
-  async function handleSelectResult(result: OLSearchResult) {
-    // Extract the short key e.g. "OL12345W" from "/works/OL12345W"
-    const workKey = result.key.replace('/works/', '')
-    let description = ""
-    try {
-      const workRes = await fetch(`https://openlibrary.org/works/${workKey}.json`)
-      if (workRes.ok) {
-        const workData = await workRes.json()
-        if (typeof workData.description === 'string') {
-          description = workData.description
-        } else if (workData.description?.value) {
-          description = workData.description.value
-        }
+  async function handleSelectResult(result: BookMetadataResult) {
+    let description = result.description
+
+    // For OL results, description is empty — fetch lazily
+    if (result.source === 'openlibrary' && !description && result.ol_key) {
+      try {
+        const res = await api.getOLDescription(result.ol_key)
+        description = res.description
+      } catch {
+        // description stays empty
       }
-    } catch {
-      // description stays empty
     }
 
     setSelected({
-      olKey: result.key,
+      olKey: result.ol_key,
+      googleBooksId: result.google_books_id,
+      source: result.source,
       title: result.title,
-      author: result.author_name?.[0] ?? "",
-      isbn: result.isbn?.[0] ?? "",
-      coverUrl: result.cover_i ? OL_COVER(result.cover_i) : "",
+      author: result.author,
+      isbn: result.isbn,
+      coverUrl: result.cover_url,
       description,
+      publisher: result.publisher,
+      publishedDate: result.published_date,
+      pageCount: result.page_count,
+      language: result.language,
     })
     setStep('confirm')
   }
@@ -116,27 +126,26 @@ export default function SharePage() {
     if (!selected) return
     setSubmitting(true)
     try {
-      // Check if book already exists by ol_key
-      let bookId: number
-      const existing = await api.getBooks({ ol_key: selected.olKey })
-      if (existing.length > 0) {
-        bookId = existing[0].id
-      } else {
-        const created = await api.createBook({
-          title: selected.title,
-          author: selected.author,
-          isbn: selected.isbn,
-          ol_key: selected.olKey,
-          cover_url: selected.coverUrl,
-          description: selected.description,
-        })
-        bookId = created.id
-      }
+      const created = await api.createBook({
+        title: selected.title,
+        author: selected.author,
+        isbn: selected.isbn,
+        ol_key: selected.olKey || undefined,
+        cover_url: selected.coverUrl,
+        description: selected.description,
+        publisher: selected.publisher || undefined,
+        published_date: selected.publishedDate || undefined,
+        page_count: selected.pageCount || undefined,
+        language: selected.language || undefined,
+        google_books_id: selected.googleBooksId || undefined,
+      })
 
       await api.createCopy({
-        book_id: bookId,
+        book_id: created.id,
         condition,
         notes: notes.trim() || undefined,
+        auto_approve: autoApprove || undefined,
+        return_date_required: returnDateRequired || undefined,
       })
 
       toast.success("Book shared! It's now in the catalog.")
@@ -154,6 +163,8 @@ export default function SharePage() {
   const [manualIsbn, setManualIsbn] = useState("")
   const [manualCondition, setManualCondition] = useState<Condition>('good')
   const [manualNotes, setManualNotes] = useState("")
+  const [manualAutoApprove, setManualAutoApprove] = useState(false)
+  const [manualReturnDateRequired, setManualReturnDateRequired] = useState(false)
   const [manualSubmitting, setManualSubmitting] = useState(false)
 
   async function handleManualSubmit() {
@@ -172,6 +183,8 @@ export default function SharePage() {
         book_id: created.id,
         condition: manualCondition,
         notes: manualNotes.trim() || undefined,
+        auto_approve: manualAutoApprove || undefined,
+        return_date_required: manualReturnDateRequired || undefined,
       })
       toast.success("Book shared!")
       router.push("/my-books")
@@ -191,7 +204,7 @@ export default function SharePage() {
   // --- Render ---
   if (step === 'manual') {
     return (
-      <div className="flex flex-col gap-6 max-w-lg">
+      <div className="flex flex-col gap-6 max-w-lg mx-auto">
         <Button
           variant="ghost"
           size="sm"
@@ -250,6 +263,27 @@ export default function SharePage() {
             />
           </div>
 
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={manualAutoApprove}
+                onChange={(e) => setManualAutoApprove(e.target.checked)}
+                className="accent-primary"
+              />
+              <span className="text-sm">Auto-approve if available</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={manualReturnDateRequired}
+                onChange={(e) => setManualReturnDateRequired(e.target.checked)}
+                className="accent-primary"
+              />
+              <span className="text-sm">Require return date from borrower</span>
+            </label>
+          </div>
+
           <Button onClick={handleManualSubmit} disabled={manualSubmitting}>
             <BookPlus className="size-4" />
             {manualSubmitting ? "Sharing…" : "Share this book"}
@@ -261,7 +295,7 @@ export default function SharePage() {
 
   if (step === 'confirm' && selected) {
     return (
-      <div className="flex flex-col gap-6 max-w-lg">
+      <div className="flex flex-col gap-6 max-w-lg mx-auto">
         <Button
           variant="ghost"
           size="sm"
@@ -299,6 +333,16 @@ export default function SharePage() {
               {selected.isbn && (
                 <p className="text-xs text-muted-foreground">ISBN: {selected.isbn}</p>
               )}
+              {selected.publisher && (
+                <p className="text-xs text-muted-foreground">{selected.publisher}{selected.publishedDate ? `, ${selected.publishedDate}` : ''}</p>
+              )}
+              {(selected.pageCount > 0 || selected.language) && (
+                <p className="text-xs text-muted-foreground">
+                  {selected.pageCount > 0 ? `${selected.pageCount} pages` : ''}
+                  {selected.pageCount > 0 && selected.language ? ' · ' : ''}
+                  {selected.language ? selected.language.toUpperCase() : ''}
+                </p>
+              )}
             </div>
           </CardHeader>
           {selected.description && (
@@ -327,6 +371,27 @@ export default function SharePage() {
             />
           </div>
 
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoApprove}
+                onChange={(e) => setAutoApprove(e.target.checked)}
+                className="accent-primary"
+              />
+              <span className="text-sm">Auto-approve if available</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={returnDateRequired}
+                onChange={(e) => setReturnDateRequired(e.target.checked)}
+                className="accent-primary"
+              />
+              <span className="text-sm">Require return date from borrower</span>
+            </label>
+          </div>
+
           <Button onClick={handleSubmitShare} disabled={submitting} size="lg">
             <BookPlus className="size-4" />
             {submitting ? "Sharing…" : "Share this book"}
@@ -336,16 +401,44 @@ export default function SharePage() {
     )
   }
 
-  // Step 1: Search
-  return (
-    <div className="flex flex-col gap-6 max-w-2xl">
-      <div>
-        <h1 className="text-2xl font-bold">Share a Book</h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Search Open Library to find your book, or enter details manually
-        </p>
-      </div>
+  // Step 1: Search — hero mode when idle, results mode when typing
+  const showHero = query.trim().length < 3 && !searching && searchResults.length === 0
 
+  if (showHero) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[45vh] gap-8 px-4">
+        <div className="flex flex-col items-center gap-2 text-center">
+          <h1 className="text-3xl font-bold">Share a Book</h1>
+          <p className="text-muted-foreground">
+            Search by title, author, or ISBN
+          </p>
+        </div>
+
+        <div className="relative w-full max-w-xl">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 size-5 text-muted-foreground pointer-events-none" />
+          <Input
+            type="search"
+            placeholder="Search by title, author, ISBN…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="pl-12 h-12 rounded-full shadow-sm text-base"
+            autoFocus
+          />
+        </div>
+
+        <button
+          onClick={() => setStep('manual')}
+          className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Can&apos;t find your book? Enter manually →
+        </button>
+      </div>
+    )
+  }
+
+  // Results mode
+  return (
+    <div className="flex flex-col gap-4 max-w-2xl mx-auto w-full">
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
         <Input
@@ -363,21 +456,21 @@ export default function SharePage() {
       )}
 
       {searching && (
-        <p className="text-sm text-muted-foreground">Searching Open Library…</p>
+        <p className="text-sm text-muted-foreground">Searching…</p>
       )}
 
       {searchResults.length > 0 && (
         <div className="flex flex-col gap-2">
-          {searchResults.map((result) => (
+          {searchResults.map((result, idx) => (
             <button
-              key={result.key}
+              key={`${result.source}-${result.ol_key || result.google_books_id || idx}`}
               onClick={() => handleSelectResult(result)}
               className="flex items-center gap-3 rounded-lg border p-3 text-left hover:bg-accent transition-colors"
             >
               <div className="relative w-10 aspect-[2/3] rounded overflow-hidden bg-muted shrink-0">
-                {result.cover_i ? (
+                {result.cover_url ? (
                   <Image
-                    src={`https://covers.openlibrary.org/b/id/${result.cover_i}-S.jpg`}
+                    src={result.cover_url}
                     alt={result.title}
                     fill
                     className="object-cover"
@@ -389,21 +482,24 @@ export default function SharePage() {
                   </div>
                 )}
               </div>
-              <div className="flex flex-col gap-0.5 min-w-0">
+              <div className="flex flex-col gap-0.5 min-w-0 flex-1">
                 <p className="text-sm font-medium truncate">{result.title}</p>
-                {result.author_name?.[0] && (
+                {result.author && (
                   <p className="text-xs text-muted-foreground truncate">
-                    {result.author_name[0]}
+                    {result.author}
                   </p>
                 )}
               </div>
+              <Badge variant="secondary" className="text-[10px] shrink-0">
+                {result.source === 'google_books' ? 'Google Books' : 'Open Library'}
+              </Badge>
             </button>
           ))}
         </div>
       )}
 
-      {!searching && query.trim() && searchResults.length === 0 && (
-        <p className="text-sm text-muted-foreground">No results from Open Library.</p>
+      {!searching && query.trim().length >= 3 && searchResults.length === 0 && (
+        <p className="text-sm text-muted-foreground">No results found.</p>
       )}
 
       <div className="border-t pt-4">

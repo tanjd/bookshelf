@@ -1,7 +1,7 @@
 {
   "name": "bookshelf-devcontainer",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
-  "postCreateCommand": "make setup && make install-tools",
+  "postCreateCommand": "make setup",
   "features": {
     "ghcr.io/devcontainers/features/go:1": {
       "version": "latest"
@@ -25,7 +25,8 @@
       "version": "latest",
       "dockerDashComposeVersion": "latest"
     },
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/guiyomh/features/golangci-lint:0": {}
   },
   "customizations": {
     "vscode": {

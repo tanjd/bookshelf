@@ -2,31 +2,47 @@ package services
 
 import (
 	"fmt"
-	"log"
-
-	"gorm.io/gorm"
+	"log/slog"
 
 	"github.com/tanjd/bookshelf/internal/models"
+	"github.com/tanjd/bookshelf/internal/repository"
 )
 
 // LoanWorkflow orchestrates side-effects (notifications, emails, copy-status
 // updates) that occur at each stage of a loan request lifecycle.
 type LoanWorkflow struct {
-	db    *gorm.DB
-	email *EmailService
+	copies    repository.CopyRepository
+	loanReqs  repository.LoanRequestRepository
+	notifs    repository.NotificationRepository
+	users     repository.UserRepository
+	waitlists repository.WaitlistRepository
+	email     *EmailService
 }
 
 // NewLoanWorkflow creates a new LoanWorkflow.
-func NewLoanWorkflow(db *gorm.DB, email *EmailService) *LoanWorkflow {
-	return &LoanWorkflow{db: db, email: email}
+func NewLoanWorkflow(
+	copies repository.CopyRepository,
+	loanReqs repository.LoanRequestRepository,
+	notifs repository.NotificationRepository,
+	users repository.UserRepository,
+	waitlists repository.WaitlistRepository,
+	email *EmailService,
+) *LoanWorkflow {
+	return &LoanWorkflow{
+		copies:    copies,
+		loanReqs:  loanReqs,
+		notifs:    notifs,
+		users:     users,
+		waitlists: waitlists,
+		email:     email,
+	}
 }
 
 // OnRequested fires when a borrower creates a new loan request.
 // It notifies the copy owner.
 func (w *LoanWorkflow) OnRequested(lr *models.LoanRequest) error {
-	// Ensure owner is loaded.
-	var bookCopy models.Copy
-	if err := w.db.Preload("Owner").First(&bookCopy, lr.CopyID).Error; err != nil {
+	bookCopy, err := w.copies.GetByIDWithOwner(lr.CopyID)
+	if err != nil {
 		return fmt.Errorf("OnRequested: load copy: %w", err)
 	}
 
@@ -35,12 +51,15 @@ func (w *LoanWorkflow) OnRequested(lr *models.LoanRequest) error {
 		Type:          "request_received",
 		LoanRequestID: &lr.ID,
 	}
-	if err := w.db.Create(&n).Error; err != nil {
-		log.Printf("OnRequested: create notification: %v", err)
+	if err := w.notifs.Create(&n); err != nil {
+		slog.Warn("OnRequested: create notification", "error", err)
 	}
 
-	var borrower models.User
-	w.db.First(&borrower, lr.BorrowerID)
+	borrower, err := w.users.FindByID(lr.BorrowerID)
+	if err != nil {
+		slog.Warn("OnRequested: load borrower", "borrower_id", lr.BorrowerID, "error", err)
+		return nil // email is best-effort; don't fail the request
+	}
 
 	subject := "Someone wants to borrow your book"
 	html := fmt.Sprintf(
@@ -53,33 +72,12 @@ func (w *LoanWorkflow) OnRequested(lr *models.LoanRequest) error {
 // OnAccepted fires when the owner accepts a loan request.
 // In a single transaction it:
 //   - Rejects all other pending requests for the same copy.
+//   - Creates rejection notifications for their borrowers.
 //   - Updates the copy status to "loaned".
 //
-// Then it notifies the borrower.
+// Then it notifies the accepted borrower.
 func (w *LoanWorkflow) OnAccepted(lr *models.LoanRequest) error {
-	err := w.db.Transaction(func(tx *gorm.DB) error {
-		// Reject competing pending requests and notify their borrowers.
-		var others []models.LoanRequest
-		tx.Where("copy_id = ? AND id != ? AND status = ?", lr.CopyID, lr.ID, "pending").Find(&others)
-		for _, other := range others {
-			other.Status = "rejected"
-			tx.Save(&other)
-
-			n := models.Notification{
-				RecipientID:   other.BorrowerID,
-				Type:          "request_rejected",
-				LoanRequestID: &other.ID,
-			}
-			tx.Create(&n)
-		}
-
-		// Mark copy as loaned.
-		if err := tx.Model(&models.Copy{}).Where("id = ?", lr.CopyID).Update("status", "loaned").Error; err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
+	if err := w.loanReqs.RejectCompetingAndUpdateCopy(lr.CopyID, lr.ID); err != nil {
 		return fmt.Errorf("OnAccepted: transaction: %w", err)
 	}
 
@@ -89,16 +87,21 @@ func (w *LoanWorkflow) OnAccepted(lr *models.LoanRequest) error {
 		Type:          "request_accepted",
 		LoanRequestID: &lr.ID,
 	}
-	if err := w.db.Create(&n).Error; err != nil {
-		log.Printf("OnAccepted: create notification: %v", err)
+	if err := w.notifs.Create(&n); err != nil {
+		slog.Warn("OnAccepted: create notification", "error", err)
 	}
 
 	// Send email to borrower.
-	var borrower models.User
-	w.db.First(&borrower, lr.BorrowerID)
+	borrower, err := w.users.FindByID(lr.BorrowerID)
+	if err != nil {
+		slog.Warn("OnAccepted: load borrower", "borrower_id", lr.BorrowerID, "error", err)
+		return nil // email is best-effort
+	}
 
-	var bookCopy models.Copy
-	w.db.Preload("Book").Preload("Owner").First(&bookCopy, lr.CopyID)
+	bookCopy, err := w.copies.GetByIDWithAssociations(lr.CopyID)
+	if err != nil {
+		return fmt.Errorf("OnAccepted: load copy: %w", err)
+	}
 
 	subject := "Your loan request was accepted"
 	html := fmt.Sprintf(
@@ -113,13 +116,9 @@ func (w *LoanWorkflow) OnAccepted(lr *models.LoanRequest) error {
 // If no other pending requests exist for the copy, the copy is set back to
 // "available".
 func (w *LoanWorkflow) OnRejected(lr *models.LoanRequest) error {
-	var pendingCount int64
-	w.db.Model(&models.LoanRequest{}).
-		Where("copy_id = ? AND id != ? AND status = ?", lr.CopyID, lr.ID, "pending").
-		Count(&pendingCount)
-
+	pendingCount, _ := w.loanReqs.CountPendingForCopyExcluding(lr.CopyID, lr.ID)
 	if pendingCount == 0 {
-		w.db.Model(&models.Copy{}).Where("id = ?", lr.CopyID).Update("status", "available")
+		w.copies.UpdateStatus(lr.CopyID, "available") //nolint:errcheck,gosec
 	}
 
 	n := models.Notification{
@@ -127,8 +126,8 @@ func (w *LoanWorkflow) OnRejected(lr *models.LoanRequest) error {
 		Type:          "request_rejected",
 		LoanRequestID: &lr.ID,
 	}
-	if err := w.db.Create(&n).Error; err != nil {
-		log.Printf("OnRejected: create notification: %v", err)
+	if err := w.notifs.Create(&n); err != nil {
+		slog.Warn("OnRejected: create notification", "error", err)
 	}
 
 	return nil
@@ -138,37 +137,57 @@ func (w *LoanWorkflow) OnRejected(lr *models.LoanRequest) error {
 // If no other pending requests exist for the copy, the copy is set back to
 // "available".
 func (w *LoanWorkflow) OnCancelled(lr *models.LoanRequest) error {
-	var pendingCount int64
-	w.db.Model(&models.LoanRequest{}).
-		Where("copy_id = ? AND id != ? AND status = ?", lr.CopyID, lr.ID, "pending").
-		Count(&pendingCount)
-
+	pendingCount, _ := w.loanReqs.CountPendingForCopyExcluding(lr.CopyID, lr.ID)
 	if pendingCount == 0 {
-		w.db.Model(&models.Copy{}).Where("id = ?", lr.CopyID).Update("status", "available")
+		w.copies.UpdateStatus(lr.CopyID, "available") //nolint:errcheck,gosec
 	}
 
 	return nil
 }
 
 // OnReturned fires when the owner marks a loan as returned.
-// The copy is set back to "available" and the borrower is notified.
+// The copy is set back to "available", the borrower is notified, and any
+// waitlisted users are notified that the copy is now available.
 func (w *LoanWorkflow) OnReturned(lr *models.LoanRequest) error {
-	w.db.Model(&models.Copy{}).Where("id = ?", lr.CopyID).Update("status", "available")
+	w.copies.UpdateStatus(lr.CopyID, "available") //nolint:errcheck,gosec
 
 	n := models.Notification{
 		RecipientID:   lr.BorrowerID,
 		Type:          "marked_returned",
 		LoanRequestID: &lr.ID,
 	}
-	if err := w.db.Create(&n).Error; err != nil {
-		log.Printf("OnReturned: create notification: %v", err)
+	if err := w.notifs.Create(&n); err != nil {
+		slog.Warn("OnReturned: create notification", "error", err)
 	}
 
-	var borrower models.User
-	w.db.First(&borrower, lr.BorrowerID)
+	borrower, err := w.users.FindByID(lr.BorrowerID)
+	if err != nil {
+		slog.Warn("OnReturned: load borrower", "borrower_id", lr.BorrowerID, "error", err)
+		return nil // email is best-effort
+	}
 
-	var bookCopy models.Copy
-	w.db.Preload("Book").First(&bookCopy, lr.CopyID)
+	bookCopy, err := w.copies.GetByIDWithAssociations(lr.CopyID)
+	if err != nil {
+		return fmt.Errorf("OnReturned: load copy: %w", err)
+	}
+
+	// Notify waitlisted users and clear the waitlist.
+	if w.waitlists != nil {
+		entries, wErr := w.waitlists.ListByCopyID(lr.CopyID)
+		if wErr == nil && len(entries) > 0 {
+			for _, entry := range entries {
+				wn := models.Notification{
+					RecipientID:   entry.UserID,
+					Type:          "waitlist_available",
+					LoanRequestID: &lr.ID,
+				}
+				if nErr := w.notifs.Create(&wn); nErr != nil {
+					slog.Warn("OnReturned: waitlist notification", "error", nErr)
+				}
+			}
+			w.waitlists.DeleteByCopyID(lr.CopyID) //nolint:errcheck,gosec
+		}
+	}
 
 	subject := "Your loan has been marked as returned"
 	html := fmt.Sprintf(
