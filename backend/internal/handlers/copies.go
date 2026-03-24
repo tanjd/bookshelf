@@ -197,6 +197,10 @@ func (h *CopyHandler) updateCopy(ctx context.Context, input *updateCopyInput) (*
 		if !allowed[*input.Body.Status] {
 			return nil, huma.Error400BadRequest("status must be 'available' or 'unavailable'")
 		}
+		// Prevent bypassing the loan workflow for active copies.
+		if bookCopy.Status == "loaned" || bookCopy.Status == "requested" {
+			return nil, huma.Error400BadRequest("cannot change status of a copy that is currently loaned or requested")
+		}
 		bookCopy.Status = *input.Body.Status
 	}
 	if input.Body.AutoApprove != nil {

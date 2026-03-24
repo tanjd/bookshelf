@@ -1,63 +1,123 @@
 name: Release
 on: workflow_dispatch
 jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Verify both Docker images build successfully.
+  # Semantic release only runs if this passes, ensuring we never tag a release
+  # that produces broken images.  Layers are cached in GHA cache for reuse by
+  # the push job.
+  # ---------------------------------------------------------------------------
+  build-check:
+    name: Verify Docker Builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # For workflow_run: only when CI succeeded and this isn't already a release commit.
+    # For workflow_dispatch: always run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       !contains(github.event.workflow_run.head_commit.message, 'chore(release)'))
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # When triggered by workflow_run, pin to the exact SHA that CI tested.
+      - name: Force branch to workflow sha
+        if: github.event_name == 'workflow_run'
+        run: git reset --hard ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend (verify — no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: false
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build frontend (verify — no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: false
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Bump version, write changelog, create GitHub release + tag.
+  # Blocked on build-check succeeding.
+  # ---------------------------------------------------------------------------
   release:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Release workflow is disabled. Uncomment the full workflow below to enable."
-# --- full workflow below (uncomment to enable) ---
-# name: Release & Push
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
 
-# on:
-#   # Automatically after CI passes on main
-#   workflow_run:
-#     workflows: [CI]
-#     branches: [main]
-#     types: [completed]
-#   # Also allow manual trigger from the Actions tab
-#   workflow_dispatch:
+      # on:
+      #   # Automatically after CI passes on main
+      #   workflow_run:
+      #     workflows: [CI]
+      #     branches: [main]
+      #     types: [completed]
+      #   # Also allow manual trigger from the Actions tab
+      #   workflow_dispatch:
 
-# # Only one release at a time
-# concurrency:
-#   group: release
-#   cancel-in-progress: false
+      # # Only one release at a time
+      # concurrency:
+      #   group: release
+      #   cancel-in-progress: false
 
-# # Default to read-only permissions
-# permissions:
-#   contents: read
+      # # Default to read-only permissions
+      # permissions:
+      #   contents: read
 
-# jobs:
-#   # ---------------------------------------------------------------------------
-#   # Job 1: Verify both Docker images build successfully.
-#   # Semantic release only runs if this passes, ensuring we never tag a release
-#   # that produces broken images.  Layers are cached in GHA cache for reuse by
-#   # the push job.
-#   # ---------------------------------------------------------------------------
-#   build-check:
-#     name: Verify Docker Builds
-#     runs-on: ubuntu-latest
-#     timeout-minutes: 20
-#     # For workflow_run: only when CI succeeded and this isn't already a release commit.
-#     # For workflow_dispatch: always run.
-#     if: >-
-#       github.event_name == 'workflow_dispatch' ||
-#       (github.event.workflow_run.conclusion == 'success' &&
-#        !contains(github.event.workflow_run.head_commit.message, 'chore(release)'))
+      # jobs:
+      #   # ---------------------------------------------------------------------------
+      #   # Job 1: Verify both Docker images build successfully.
+      #   # Semantic release only runs if this passes, ensuring we never tag a release
+      #   # that produces broken images.  Layers are cached in GHA cache for reuse by
+      #   # the push job.
+      #   # ---------------------------------------------------------------------------
+      #   build-check:
+      #     name: Verify Docker Builds
+      #     runs-on: ubuntu-latest
+      #     timeout-minutes: 20
+      #     # For workflow_run: only when CI succeeded and this isn't already a release commit.
+      #     # For workflow_dispatch: always run.
+      #     if: >-
+      #       github.event_name == 'workflow_dispatch' ||
+      #       (github.event.workflow_run.conclusion == 'success' &&
+      #        !contains(github.event.workflow_run.head_commit.message, 'chore(release)'))
 
-#     steps:
-#       - name: Checkout code
-#         uses: actions/checkout@v6
-#         with:
-#           ref: main
-#           fetch-depth: 0
+      #     steps:
+      #       - name: Checkout code
+      #         uses: actions/checkout@v6
+      #         with:
+      #           ref: main
+      #           fetch-depth: 0
 
-#       # When triggered by workflow_run, pin to the exact SHA that CI tested.
-#       - name: Force branch to workflow sha
-#         if: github.event_name == 'workflow_run'
-#         run: git reset --hard ${{ github.event.workflow_run.head_sha }}
+      #       # When triggered by workflow_run, pin to the exact SHA that CI tested.
+      #       - name: Force branch to workflow sha
+      #         if: github.event_name == 'workflow_run'
+      #         run: git reset --hard ${{ github.event.workflow_run.head_sha }}
 
-#       - name: Set up Docker Buildx
-#         uses: docker/setup-buildx-action@v3
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
 
 #       - name: Build backend (verify — no push)
 #         uses: docker/build-push-action@v6

@@ -4,6 +4,7 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -302,6 +303,10 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 			return nil, huma.Error400BadRequest("email already in use")
 		}
 		user.Email = *input.Body.Email
+		// New email must be re-verified.
+		user.Verified = false
+		user.OTPCode = ""
+		user.OTPExpiry = nil
 	}
 
 	if err := h.users.Save(user); err != nil {
@@ -386,8 +391,8 @@ func (h *AuthHandler) sendOTP(ctx context.Context, _ *sendOTPInput) (*struct{}, 
 		user.Name, code,
 	)
 	if err := h.email.SendEmail(user.Email, "Your Bookshelf verification code", html); err != nil {
-		// Log but don't fail — user can retry
-		_ = err
+		// Log but don't fail — user can retry.
+		slog.WarnContext(ctx, "sendOTP: email delivery failed", "user_id", userID, "error", err)
 	}
 
 	return nil, nil
@@ -410,8 +415,13 @@ func (h *AuthHandler) verifyOTP(ctx context.Context, input *verifyOTPInput) (*me
 	if time.Now().After(*user.OTPExpiry) {
 		return nil, huma.Error400BadRequest("OTP has expired")
 	}
-	if user.OTPCode != input.Body.Code {
-		return nil, huma.Error400BadRequest("invalid OTP code")
+	// Use constant-time comparison to prevent timing attacks, and invalidate
+	// the OTP on any wrong attempt to prevent brute-force enumeration.
+	if subtle.ConstantTimeCompare([]byte(user.OTPCode), []byte(input.Body.Code)) != 1 {
+		user.OTPCode = ""
+		user.OTPExpiry = nil
+		_ = h.users.Save(user) //nolint:errcheck
+		return nil, huma.Error400BadRequest("invalid OTP code — please request a new one")
 	}
 
 	user.Verified = true

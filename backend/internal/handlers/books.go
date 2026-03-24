@@ -150,9 +150,9 @@ func (h *BookHandler) listBooks(_ context.Context, input *listBooksInput) (*list
 		return nil, huma.Error500InternalServerError("could not fetch books")
 	}
 
-	items := make([]bookResponse, len(result.Items))
-	for i, b := range result.Items {
-		items[i] = h.toBookResponse(b)
+	items, err := h.toBooksResponse(result.Items)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not fetch book counts")
 	}
 
 	var out listBooksOutput
@@ -173,9 +173,9 @@ func (h *BookHandler) listRecentBooks(_ context.Context, input *listRecentBooksI
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not fetch recent books")
 	}
-	resp := make([]bookResponse, len(books))
-	for i, b := range books {
-		resp[i] = h.toBookResponse(b)
+	resp, err := h.toBooksResponse(books)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not fetch book counts")
 	}
 	return &listRecentBooksOutput{Body: resp}, nil
 }
@@ -246,8 +246,27 @@ func (h *BookHandler) createBook(ctx context.Context, input *createBookInput) (*
 	return &createBookOutput{Body: book}, nil
 }
 
-// toBookResponse computes the available_copies count and wraps the book.
+// toBookResponse computes the available_copies count for a single book.
+// Prefer toBooksResponse for list operations to avoid N+1 queries.
 func (h *BookHandler) toBookResponse(book models.Book) bookResponse {
 	count, _ := h.books.CountAvailableCopies(book.ID)
 	return bookResponse{Book: book, AvailableCopies: count}
+}
+
+// toBooksResponse fetches available copy counts for all books in a single
+// batch query and returns the assembled responses.
+func (h *BookHandler) toBooksResponse(books []models.Book) ([]bookResponse, error) {
+	ids := make([]uint, len(books))
+	for i, b := range books {
+		ids[i] = b.ID
+	}
+	counts, err := h.books.CountAvailableCopiesBatch(ids)
+	if err != nil {
+		return nil, err
+	}
+	resp := make([]bookResponse, len(books))
+	for i, b := range books {
+		resp[i] = bookResponse{Book: b, AvailableCopies: counts[b.ID]}
+	}
+	return resp, nil
 }

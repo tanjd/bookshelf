@@ -2,7 +2,7 @@ package services
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/tanjd/bookshelf/internal/models"
 	"github.com/tanjd/bookshelf/internal/repository"
@@ -52,10 +52,14 @@ func (w *LoanWorkflow) OnRequested(lr *models.LoanRequest) error {
 		LoanRequestID: &lr.ID,
 	}
 	if err := w.notifs.Create(&n); err != nil {
-		log.Printf("OnRequested: create notification: %v", err)
+		slog.Warn("OnRequested: create notification", "error", err)
 	}
 
-	borrower, _ := w.users.FindByID(lr.BorrowerID)
+	borrower, err := w.users.FindByID(lr.BorrowerID)
+	if err != nil {
+		slog.Warn("OnRequested: load borrower", "borrower_id", lr.BorrowerID, "error", err)
+		return nil // email is best-effort; don't fail the request
+	}
 
 	subject := "Someone wants to borrow your book"
 	html := fmt.Sprintf(
@@ -84,11 +88,15 @@ func (w *LoanWorkflow) OnAccepted(lr *models.LoanRequest) error {
 		LoanRequestID: &lr.ID,
 	}
 	if err := w.notifs.Create(&n); err != nil {
-		log.Printf("OnAccepted: create notification: %v", err)
+		slog.Warn("OnAccepted: create notification", "error", err)
 	}
 
 	// Send email to borrower.
-	borrower, _ := w.users.FindByID(lr.BorrowerID)
+	borrower, err := w.users.FindByID(lr.BorrowerID)
+	if err != nil {
+		slog.Warn("OnAccepted: load borrower", "borrower_id", lr.BorrowerID, "error", err)
+		return nil // email is best-effort
+	}
 
 	bookCopy, err := w.copies.GetByIDWithAssociations(lr.CopyID)
 	if err != nil {
@@ -119,7 +127,7 @@ func (w *LoanWorkflow) OnRejected(lr *models.LoanRequest) error {
 		LoanRequestID: &lr.ID,
 	}
 	if err := w.notifs.Create(&n); err != nil {
-		log.Printf("OnRejected: create notification: %v", err)
+		slog.Warn("OnRejected: create notification", "error", err)
 	}
 
 	return nil
@@ -149,10 +157,14 @@ func (w *LoanWorkflow) OnReturned(lr *models.LoanRequest) error {
 		LoanRequestID: &lr.ID,
 	}
 	if err := w.notifs.Create(&n); err != nil {
-		log.Printf("OnReturned: create notification: %v", err)
+		slog.Warn("OnReturned: create notification", "error", err)
 	}
 
-	borrower, _ := w.users.FindByID(lr.BorrowerID)
+	borrower, err := w.users.FindByID(lr.BorrowerID)
+	if err != nil {
+		slog.Warn("OnReturned: load borrower", "borrower_id", lr.BorrowerID, "error", err)
+		return nil // email is best-effort
+	}
 
 	bookCopy, err := w.copies.GetByIDWithAssociations(lr.CopyID)
 	if err != nil {
@@ -170,7 +182,7 @@ func (w *LoanWorkflow) OnReturned(lr *models.LoanRequest) error {
 					LoanRequestID: &lr.ID,
 				}
 				if nErr := w.notifs.Create(&wn); nErr != nil {
-					log.Printf("OnReturned: waitlist notification: %v", nErr)
+					slog.Warn("OnReturned: waitlist notification", "error", nErr)
 				}
 			}
 			w.waitlists.DeleteByCopyID(lr.CopyID) //nolint:errcheck,gosec

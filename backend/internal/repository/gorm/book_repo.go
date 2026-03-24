@@ -120,3 +120,27 @@ func (r *BookRepository) CountAvailableCopies(bookID uint) (int64, error) {
 		Count(&count).Error
 	return count, err
 }
+
+func (r *BookRepository) CountAvailableCopiesBatch(bookIDs []uint) (map[uint]int64, error) {
+	if len(bookIDs) == 0 {
+		return map[uint]int64{}, nil
+	}
+	type row struct {
+		BookID uint
+		Count  int64
+	}
+	var rows []row
+	err := r.db.Model(&models.Copy{}).
+		Select("book_id, count(*) as count").
+		Where("book_id IN ? AND status = ?", bookIDs, "available").
+		Group("book_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint]int64, len(rows))
+	for _, r := range rows {
+		out[r.BookID] = r.Count
+	}
+	return out, nil
+}

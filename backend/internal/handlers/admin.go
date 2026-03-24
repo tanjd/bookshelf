@@ -161,11 +161,14 @@ func (h *AdminHandler) updateUser(ctx context.Context, input *updateAdminUserInp
 	}
 
 	if input.Body.Role != nil {
-		// Prevent admins from demoting themselves
+		if *input.Body.Role != "admin" && *input.Body.Role != "user" {
+			return nil, huma.Error400BadRequest("role must be 'admin' or 'user'")
+		}
+		// Prevent admins from demoting themselves.
 		if user.ID == callerID && *input.Body.Role != "admin" {
 			return nil, huma.Error400BadRequest("cannot demote yourself")
 		}
-		// Prevent demoting the last admin
+		// Prevent demoting the last admin.
 		if user.Role == "admin" && *input.Body.Role != "admin" {
 			count, err := h.admin.CountByRole("admin")
 			if err != nil {

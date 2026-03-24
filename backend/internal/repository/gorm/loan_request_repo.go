@@ -23,6 +23,25 @@ func (r *LoanRequestRepository) Create(lr *models.LoanRequest) error {
 	return r.db.Create(lr).Error
 }
 
+// CreateAndMarkRequested atomically inserts a loan request and sets the copy
+// status to "requested", preventing double-booking via a database transaction.
+func (r *LoanRequestRepository) CreateAndMarkRequested(lr *models.LoanRequest) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// Re-check availability inside the transaction to close the TOCTOU window.
+		var copy models.Copy
+		if err := tx.First(&copy, lr.CopyID).Error; err != nil {
+			return err
+		}
+		if copy.Status != "available" {
+			return repository.ErrConflict
+		}
+		if err := tx.Create(lr).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.Copy{}).Where("id = ?", lr.CopyID).Update("status", "requested").Error
+	})
+}
+
 func (r *LoanRequestRepository) GetByID(id uint) (*models.LoanRequest, error) {
 	var lr models.LoanRequest
 	if err := r.db.First(&lr, id).Error; err != nil {
@@ -116,19 +135,23 @@ func (r *LoanRequestRepository) Save(lr *models.LoanRequest) error {
 func (r *LoanRequestRepository) RejectCompetingAndUpdateCopy(copyID, acceptedLoanID uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		var others []models.LoanRequest
-		tx.Where("copy_id = ? AND id != ? AND status = ?", copyID, acceptedLoanID, "pending").Find(&others)
+		if err := tx.Where("copy_id = ? AND id != ? AND status = ?", copyID, acceptedLoanID, "pending").Find(&others).Error; err != nil {
+			return err
+		}
 		for _, other := range others {
 			other.Status = "rejected"
-			tx.Save(&other)
-
+			if err := tx.Save(&other).Error; err != nil {
+				return err
+			}
 			n := models.Notification{
 				RecipientID:   other.BorrowerID,
 				Type:          "request_rejected",
 				LoanRequestID: &other.ID,
 			}
-			tx.Create(&n)
+			if err := tx.Create(&n).Error; err != nil {
+				return err
+			}
 		}
-
 		return tx.Model(&models.Copy{}).Where("id = ?", copyID).Update("status", "loaned").Error
 	})
 }

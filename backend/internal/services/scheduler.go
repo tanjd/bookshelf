@@ -246,7 +246,8 @@ func (s *Scheduler) downloadCover(externalURL string) (string, error) {
 	}
 	defer f.Close() //nolint:errcheck
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	const maxBytes = 10 << 20 // 10 MiB
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes)); err != nil {
 		_ = os.Remove(destPath)
 		return "", err
 	}

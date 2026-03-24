@@ -44,6 +44,9 @@ type BookRepository interface {
 	Create(book *models.Book) error
 	Save(book *models.Book) error
 	CountAvailableCopies(bookID uint) (int64, error)
+	// CountAvailableCopiesBatch returns a map of bookID → available copy count
+	// for all requested book IDs in a single query.
+	CountAvailableCopiesBatch(bookIDs []uint) (map[uint]int64, error)
 }
 
 // CopyRepository handles persistence for Copy records.
@@ -61,6 +64,10 @@ type CopyRepository interface {
 // LoanRequestRepository handles persistence for LoanRequest records.
 type LoanRequestRepository interface {
 	Create(lr *models.LoanRequest) error
+	// CreateAndMarkRequested atomically creates the loan request and sets the
+	// copy status to "requested". Returns ErrConflict if the copy is no longer
+	// available (closes the TOCTOU window between check and insert).
+	CreateAndMarkRequested(lr *models.LoanRequest) error
 	GetByID(id uint) (*models.LoanRequest, error)
 	GetByIDWithCopyAndBorrower(id uint) (*models.LoanRequest, error)
 	GetByIDWithFullAssociations(id uint) (*models.LoanRequest, error)

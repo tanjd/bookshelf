@@ -6,11 +6,43 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// coverMaxBytes is the maximum size accepted for a downloaded cover image (10 MiB).
+const coverMaxBytes = 10 << 20
+
+// allowedCoverHosts is the set of trusted external image hosts.
+// Only URLs whose host matches one of these suffixes are fetched server-side,
+// preventing SSRF attacks from user-supplied cover_url values.
+var allowedCoverHosts = []string{
+	"covers.openlibrary.org",
+	"books.google.com",
+	"books.googleusercontent.com",
+	"cover.books.readmill.com",
+}
+
+// isCoverURLAllowed reports whether the given URL is safe to fetch.
+func isCoverURLAllowed(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, allowed := range allowedCoverHosts {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+	return false
+}
 
 // downloadCover fetches an external image URL and saves it to destDir.
 // Returns the proxy-accessible path (/api/covers/<filename>) on success.
@@ -25,12 +57,16 @@ func downloadCover(externalURL, destDir string) (string, error) {
 		return externalURL, nil
 	}
 
+	if !isCoverURLAllowed(externalURL) {
+		return "", fmt.Errorf("cover URL host not in allowlist: %s", externalURL)
+	}
+
 	// Deterministic filename: first 8 bytes of SHA-256(url) as hex.
 	sum := sha256.Sum256([]byte(externalURL))
 	baseName := fmt.Sprintf("%x", sum[:8])
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(externalURL) //nolint:noctx
+	resp, err := client.Get(externalURL) //nolint:noctx,gosec
 	if err != nil {
 		return "", err
 	}
@@ -66,7 +102,7 @@ func downloadCover(externalURL, destDir string) (string, error) {
 	}
 	defer f.Close() //nolint:errcheck
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, coverMaxBytes)); err != nil {
 		_ = os.Remove(destPath) // clean up partial file
 		return "", err
 	}

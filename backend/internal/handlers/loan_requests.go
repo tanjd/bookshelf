@@ -346,12 +346,15 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 		lr.ExpectedReturnDate = &t
 	}
 
-	if err := h.loanReqs.Create(&lr); err != nil {
+	// Atomically create the loan request and mark the copy as requested,
+	// preventing a TOCTOU race where two concurrent requests both pass the
+	// availability check above and result in two active loan requests.
+	if err := h.loanReqs.CreateAndMarkRequested(&lr); err != nil {
+		if errors.Is(err, repository.ErrConflict) {
+			return nil, huma.Error400BadRequest("copy is no longer available")
+		}
 		return nil, huma.Error500InternalServerError("could not create loan request")
 	}
-
-	// Mark copy as requested.
-	h.copies.UpdateStatus(bookCopy.ID, "requested") //nolint:errcheck,gosec
 
 	// Load associations needed by the workflow.
 	loaded, _ := h.loanReqs.GetByIDWithCopyOwnerAndBorrower(lr.ID)
@@ -359,8 +362,12 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 		lr = *loaded
 	}
 
-	if err := h.workflow.OnRequested(&lr); err != nil {
-		slog.ErrorContext(ctx, "workflow.OnRequested failed", "error", err)
+	// Skip OnRequested when auto-approving to avoid sending a redundant
+	// "someone wants to borrow your book" email that is immediately superseded.
+	if !bookCopy.AutoApprove {
+		if err := h.workflow.OnRequested(&lr); err != nil {
+			slog.ErrorContext(ctx, "workflow.OnRequested failed", "error", err)
+		}
 	}
 
 	// Auto-approve if enabled.
