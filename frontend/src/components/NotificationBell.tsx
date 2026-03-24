@@ -13,8 +13,8 @@ export function NotificationBell() {
     const token = localStorage.getItem("bookshelf_token")
     if (!token) return
     try {
-      const notifications = await api.getNotifications(true)
-      setUnreadCount(notifications.length)
+      const result = await api.getNotifications({ unread: true, page_size: 100 })
+      setUnreadCount(result.items.filter((n) => !n.read).length)
     } catch {
       // silently ignore — user may not be logged in
     }

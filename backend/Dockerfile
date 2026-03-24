@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /build
 
@@ -9,7 +9,8 @@ RUN go mod download
 
 # Copy the rest of the source and build.
 COPY . .
-RUN CGO_ENABLED=1 GOOS=linux go build -o /app/server ./cmd/server
+ARG VERSION=dev
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o /app/server ./cmd/server
 
 # Stage 2: Runtime
 FROM alpine:3.20

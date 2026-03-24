@@ -7,5 +7,6 @@ CREATE TABLE loan_requests (
     requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     responded_at DATETIME,
     loaned_at DATETIME,
-    returned_at DATETIME
+    returned_at DATETIME,
+    expected_return_date DATETIME
 );

@@ -3,26 +3,62 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/big"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
 	"github.com/tanjd/bookshelf/internal/models"
+	"github.com/tanjd/bookshelf/internal/repository"
+	"github.com/tanjd/bookshelf/internal/services"
 )
+
+// validatePasswordComplexity checks that p meets minimum complexity requirements.
+// Returns a human-readable error string, or "" if valid.
+func validatePasswordComplexity(p string) string {
+	if len(p) < 8 {
+		return "password must be at least 8 characters"
+	}
+	var hasUpper, hasLower, hasDigit bool
+	for _, c := range p {
+		switch {
+		case c >= 'A' && c <= 'Z':
+			hasUpper = true
+		case c >= 'a' && c <= 'z':
+			hasLower = true
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		}
+	}
+	if !hasUpper {
+		return "password must contain at least one uppercase letter"
+	}
+	if !hasLower {
+		return "password must contain at least one lowercase letter"
+	}
+	if !hasDigit {
+		return "password must contain at least one number"
+	}
+	return ""
+}
 
 // AuthHandler holds dependencies for authentication routes.
 type AuthHandler struct {
-	db        *gorm.DB
+	users     repository.UserRepository
 	jwtSecret string
+	email     *services.EmailService
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(db *gorm.DB, jwtSecret string) *AuthHandler {
-	return &AuthHandler{db: db, jwtSecret: jwtSecret}
+func NewAuthHandler(users repository.UserRepository, jwtSecret string, email *services.EmailService) *AuthHandler {
+	return &AuthHandler{users: users, jwtSecret: jwtSecret, email: email}
 }
 
 // --- Input / Output types ---
@@ -55,6 +91,37 @@ type updateMeInput struct {
 	Body struct {
 		Name  *string `json:"name,omitempty" doc:"New display name"`
 		Phone *string `json:"phone,omitempty" doc:"Contact phone number"`
+		Email *string `json:"email,omitempty" format:"email" doc:"New email address"`
+	}
+}
+
+type setupStatusOutput struct {
+	Body struct {
+		NeedsSetup bool `json:"needs_setup"`
+	}
+}
+
+type setupInput struct {
+	Body struct {
+		Name     string `json:"name" required:"true" minLength:"1" doc:"Admin display name"`
+		Email    string `json:"email" required:"true" format:"email" doc:"Admin email address"`
+		Password string `json:"password" required:"true" minLength:"8" doc:"Admin password (min 8 chars)"`
+	}
+}
+
+type sendOTPInput struct{}
+
+type verifyOTPInput struct {
+	Body struct {
+		Code string `json:"code" required:"true" doc:"6-digit OTP code"`
+	}
+}
+
+type changePasswordInput struct {
+	Body struct {
+		CurrentPassword string `json:"current_password" required:"true" minLength:"1" doc:"Current password"`
+		NewPassword     string `json:"new_password" required:"true" minLength:"8" doc:"New password (min 8 chars, mixed case + digit)"`
+		ConfirmPassword string `json:"confirm_password" required:"true" minLength:"1" doc:"Must match new_password"`
 	}
 }
 
@@ -96,6 +163,50 @@ func (h *AuthHandler) RegisterRoutes(api huma.API) {
 		Summary:     "Update the authenticated user's profile",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, h.updateMe)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "setup-status",
+		Method:      "GET",
+		Path:        "/auth/setup-status",
+		Tags:        []string{"auth"},
+		Summary:     "Check whether initial admin setup is required",
+	}, h.setupStatus)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "setup",
+		Method:        "POST",
+		Path:          "/auth/setup",
+		Tags:          []string{"auth"},
+		Summary:       "Create the initial admin account (one-time, fails if admin already exists)",
+		DefaultStatus: 201,
+	}, h.setup)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "send-otp",
+		Method:      "POST",
+		Path:        "/auth/send-otp",
+		Tags:        []string{"auth"},
+		Summary:     "Send a 6-digit OTP to the authenticated user's email for verification",
+		Security:    []map[string][]string{{"bearer": {}}},
+	}, h.sendOTP)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "verify-otp",
+		Method:      "POST",
+		Path:        "/auth/verify-otp",
+		Tags:        []string{"auth"},
+		Summary:     "Verify the OTP and mark the user as verified",
+		Security:    []map[string][]string{{"bearer": {}}},
+	}, h.verifyOTP)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "change-password",
+		Method:      "POST",
+		Path:        "/auth/me/password",
+		Tags:        []string{"auth"},
+		Summary:     "Change the authenticated user's password",
+		Security:    []map[string][]string{{"bearer": {}}},
+	}, h.changePassword)
 }
 
 // --- Handlers ---
@@ -103,6 +214,9 @@ func (h *AuthHandler) RegisterRoutes(api huma.API) {
 func (h *AuthHandler) register(_ context.Context, input *registerInput) (*authOutput, error) {
 	if input.Body.Name == "" || input.Body.Email == "" || input.Body.Password == "" {
 		return nil, huma.Error400BadRequest("name, email and password are required")
+	}
+	if msg := validatePasswordComplexity(input.Body.Password); msg != "" {
+		return nil, huma.Error400BadRequest(msg)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Body.Password), 12)
@@ -115,11 +229,11 @@ func (h *AuthHandler) register(_ context.Context, input *registerInput) (*authOu
 		Email:    input.Body.Email,
 		Password: string(hash),
 	}
-	if result := h.db.Create(&user); result.Error != nil {
+	if err := h.users.Create(&user); err != nil {
 		return nil, huma.Error400BadRequest("email already registered")
 	}
 
-	token, err := h.issueToken(user.ID)
+	token, err := h.issueToken(user.ID, user.Role)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not issue token")
 	}
@@ -128,8 +242,8 @@ func (h *AuthHandler) register(_ context.Context, input *registerInput) (*authOu
 }
 
 func (h *AuthHandler) login(_ context.Context, input *loginInput) (*authOutput, error) {
-	var user models.User
-	if err := h.db.Where("email = ?", input.Body.Email).First(&user).Error; err != nil {
+	user, err := h.users.FindByEmail(input.Body.Email)
+	if err != nil {
 		return nil, huma.Error401Unauthorized("invalid credentials")
 	}
 
@@ -137,12 +251,12 @@ func (h *AuthHandler) login(_ context.Context, input *loginInput) (*authOutput, 
 		return nil, huma.Error401Unauthorized("invalid credentials")
 	}
 
-	token, err := h.issueToken(user.ID)
+	token, err := h.issueToken(user.ID, user.Role)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not issue token")
 	}
 
-	return &authOutput{Body: authResponse{Token: token, User: user}}, nil
+	return &authOutput{Body: authResponse{Token: token, User: *user}}, nil
 }
 
 func (h *AuthHandler) me(ctx context.Context, _ *struct{}) (*meOutput, error) {
@@ -151,12 +265,15 @@ func (h *AuthHandler) me(ctx context.Context, _ *struct{}) (*meOutput, error) {
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	var user models.User
-	if err := h.db.First(&user, userID).Error; err != nil {
-		return nil, huma.Error404NotFound("user not found")
+	user, err := h.users.FindByID(userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("user not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch user")
 	}
 
-	return &meOutput{Body: user}, nil
+	return &meOutput{Body: *user}, nil
 }
 
 func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOutput, error) {
@@ -165,9 +282,12 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	var user models.User
-	if err := h.db.First(&user, userID).Error; err != nil {
-		return nil, huma.Error404NotFound("user not found")
+	user, err := h.users.FindByID(userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("user not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch user")
 	}
 
 	if input.Body.Name != nil {
@@ -176,18 +296,179 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 	if input.Body.Phone != nil {
 		user.Phone = *input.Body.Phone
 	}
+	if input.Body.Email != nil && *input.Body.Email != user.Email {
+		existing, findErr := h.users.FindByEmail(*input.Body.Email)
+		if findErr == nil && existing.ID != user.ID {
+			return nil, huma.Error400BadRequest("email already in use")
+		}
+		user.Email = *input.Body.Email
+	}
 
-	if err := h.db.Save(&user).Error; err != nil {
+	if err := h.users.Save(user); err != nil {
 		return nil, huma.Error500InternalServerError("could not update user")
 	}
 
-	return &meOutput{Body: user}, nil
+	return &meOutput{Body: *user}, nil
 }
 
-// issueToken creates a signed HS256 JWT for the given user ID with a 24-hour expiry.
-func (h *AuthHandler) issueToken(userID uint) (string, error) {
+func (h *AuthHandler) setupStatus(_ context.Context, _ *struct{}) (*setupStatusOutput, error) {
+	hasAdmin, err := h.users.HasAdmin()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not check setup status")
+	}
+	out := &setupStatusOutput{}
+	out.Body.NeedsSetup = !hasAdmin
+	return out, nil
+}
+
+func (h *AuthHandler) setup(_ context.Context, input *setupInput) (*authOutput, error) {
+	hasAdmin, err := h.users.HasAdmin()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not check setup status")
+	}
+	if hasAdmin {
+		return nil, huma.Error403Forbidden("setup already complete")
+	}
+	if msg := validatePasswordComplexity(input.Body.Password); msg != "" {
+		return nil, huma.Error400BadRequest(msg)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.Body.Password), 12)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not hash password")
+	}
+
+	user := models.User{
+		Name:     input.Body.Name,
+		Email:    input.Body.Email,
+		Password: string(hash),
+		Role:     "admin",
+		Verified: true,
+	}
+	if err := h.users.Create(&user); err != nil {
+		return nil, huma.Error400BadRequest("email already registered")
+	}
+
+	token, err := h.issueToken(user.ID, user.Role)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not issue token")
+	}
+
+	return &authOutput{Body: authResponse{Token: token, User: user}}, nil
+}
+
+func (h *AuthHandler) sendOTP(ctx context.Context, _ *sendOTPInput) (*struct{}, error) {
+	userID, err := middleware.GetRequiredUserID(ctx)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("authentication required")
+	}
+
+	user, err := h.users.FindByID(userID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not generate OTP")
+	}
+	code := fmt.Sprintf("%06d", n.Int64())
+	expiry := time.Now().Add(15 * time.Minute)
+
+	user.OTPCode = code
+	user.OTPExpiry = &expiry
+	if err := h.users.Save(user); err != nil {
+		return nil, huma.Error500InternalServerError("could not save OTP")
+	}
+
+	html := fmt.Sprintf(
+		"<p>Hi %s,</p><p>Your Bookshelf verification code is: <strong>%s</strong></p><p>This code expires in 15 minutes.</p>",
+		user.Name, code,
+	)
+	if err := h.email.SendEmail(user.Email, "Your Bookshelf verification code", html); err != nil {
+		// Log but don't fail — user can retry
+		_ = err
+	}
+
+	return nil, nil
+}
+
+func (h *AuthHandler) verifyOTP(ctx context.Context, input *verifyOTPInput) (*meOutput, error) {
+	userID, err := middleware.GetRequiredUserID(ctx)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("authentication required")
+	}
+
+	user, err := h.users.FindByID(userID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	if user.OTPCode == "" || user.OTPExpiry == nil {
+		return nil, huma.Error400BadRequest("no OTP has been sent")
+	}
+	if time.Now().After(*user.OTPExpiry) {
+		return nil, huma.Error400BadRequest("OTP has expired")
+	}
+	if user.OTPCode != input.Body.Code {
+		return nil, huma.Error400BadRequest("invalid OTP code")
+	}
+
+	user.Verified = true
+	user.OTPCode = ""
+	user.OTPExpiry = nil
+	if err := h.users.Save(user); err != nil {
+		return nil, huma.Error500InternalServerError("could not update user")
+	}
+
+	return &meOutput{Body: *user}, nil
+}
+
+func (h *AuthHandler) changePassword(ctx context.Context, input *changePasswordInput) (*struct{}, error) {
+	userID, err := middleware.GetRequiredUserID(ctx)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("authentication required")
+	}
+
+	user, err := h.users.FindByID(userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("user not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Body.CurrentPassword)); err != nil {
+		return nil, huma.Error400BadRequest("current password is incorrect")
+	}
+
+	if input.Body.NewPassword != input.Body.ConfirmPassword {
+		return nil, huma.Error400BadRequest("new passwords do not match")
+	}
+
+	if msg := validatePasswordComplexity(input.Body.NewPassword); msg != "" {
+		return nil, huma.Error400BadRequest(msg)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.Body.NewPassword), 12)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not hash password")
+	}
+
+	user.Password = string(hash)
+	if err := h.users.Save(user); err != nil {
+		return nil, huma.Error500InternalServerError("could not update password")
+	}
+
+	slog.Info("password changed", "user_id", userID)
+	return nil, nil
+}
+
+// issueToken creates a signed HS256 JWT for the given user with a 24-hour expiry.
+func (h *AuthHandler) issueToken(userID uint, role string) (string, error) {
 	claims := middleware.JWTClaims{
 		UserID: userID,
+		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

@@ -3,6 +3,7 @@ import { Geist } from "next/font/google"
 import { Toaster } from "sonner"
 import "./globals.css"
 import { NavBar } from "@/components/layout/NavBar"
+import { SetupGuard } from "@/components/auth/SetupGuard"
 
 const geist = Geist({ variable: "--font-geist-sans", subsets: ["latin"] })
 
@@ -16,7 +17,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body className={`${geist.variable} font-sans antialiased`}>
         <NavBar />
-        <main className="max-w-6xl mx-auto px-4 py-6">{children}</main>
+        <main className="max-w-6xl mx-auto px-4 py-6">
+          <SetupGuard>{children}</SetupGuard>
+        </main>
+        <footer className="text-xs text-muted-foreground text-center py-4">
+          v{process.env.NEXT_PUBLIC_VERSION}
+        </footer>
         <Toaster richColors position="bottom-right" />
       </body>
     </html>

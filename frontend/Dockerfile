@@ -5,7 +5,7 @@ FROM node:22-slim AS deps
 
 WORKDIR /app
 
-COPY --link frontend/package.json frontend/package-lock.json* ./
+COPY --link package.json package-lock.json* ./
 RUN npm ci
 
 # -----------------------------------------------------------------------------
@@ -16,7 +16,7 @@ FROM node:22-slim AS builder
 WORKDIR /app
 
 COPY --from=deps --link /app/node_modules ./node_modules
-COPY --link frontend/ .
+COPY --link . .
 
 ENV NEXT_TELEMETRY_DISABLED=1
 

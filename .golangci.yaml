@@ -30,3 +30,11 @@ formatters:
 issues:
   exclude-dirs:
     - vendor
+  exclusions:
+    rules:
+      # Interface implementations in the gorm package don't need redundant
+      # doc comments — documentation lives on the repository interfaces.
+      - path: "backend/internal/repository/gorm"
+        linters:
+          - revive
+        text: "(exported|package-comments)"

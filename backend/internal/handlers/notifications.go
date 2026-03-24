@@ -4,29 +4,39 @@ import (
 	"context"
 
 	"github.com/danielgtaylor/huma/v2"
-	"gorm.io/gorm"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
 	"github.com/tanjd/bookshelf/internal/models"
+	"github.com/tanjd/bookshelf/internal/repository"
 )
 
 // NotificationHandler holds dependencies for notification routes.
 type NotificationHandler struct {
-	db *gorm.DB
+	notifs repository.NotificationRepository
 }
 
 // NewNotificationHandler creates a new NotificationHandler.
-func NewNotificationHandler(db *gorm.DB) *NotificationHandler {
-	return &NotificationHandler{db: db}
+func NewNotificationHandler(notifs repository.NotificationRepository) *NotificationHandler {
+	return &NotificationHandler{notifs: notifs}
 }
 
 // --- Input / Output types ---
 
 type listNotificationsInput struct {
-	Unread bool `query:"unread" doc:"When true, return only unread notifications"`
+	Unread   bool `query:"unread" doc:"When true, return only unread notifications"`
+	Page     int  `query:"page" minimum:"1" doc:"Page number (default 1)"`
+	PageSize int  `query:"page_size" minimum:"1" maximum:"100" doc:"Items per page (default 20)"`
 }
 
-type listNotificationsOutput struct{ Body []models.Notification }
+type listNotificationsOutput struct {
+	Body struct {
+		Items      []models.Notification `json:"items"`
+		Total      int64                 `json:"total"`
+		Page       int                   `json:"page"`
+		PageSize   int                   `json:"page_size"`
+		TotalPages int                   `json:"total_pages"`
+	}
+}
 
 type markReadInput struct {
 	ID uint `path:"id" doc:"Notification ID"`
@@ -82,17 +92,27 @@ func (h *NotificationHandler) listNotifications(ctx context.Context, input *list
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	tx := h.db.Where("recipient_id = ?", userID).Order("created_at DESC")
-	if input.Unread {
-		tx = tx.Where("read = ?", false)
+	page := input.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := input.PageSize
+	if pageSize < 1 {
+		pageSize = 20
 	}
 
-	var notifications []models.Notification
-	if err := tx.Find(&notifications).Error; err != nil {
+	result, err := h.notifs.FindByRecipientPaginated(userID, input.Unread, page, pageSize)
+	if err != nil {
 		return nil, huma.Error500InternalServerError("could not fetch notifications")
 	}
 
-	return &listNotificationsOutput{Body: notifications}, nil
+	var out listNotificationsOutput
+	out.Body.Items = result.Items
+	out.Body.Total = result.Total
+	out.Body.Page = result.Page
+	out.Body.PageSize = result.PageSize
+	out.Body.TotalPages = result.TotalPages
+	return &out, nil
 }
 
 func (h *NotificationHandler) markRead(ctx context.Context, input *markReadInput) (*markReadOutput, error) {
@@ -101,8 +121,8 @@ func (h *NotificationHandler) markRead(ctx context.Context, input *markReadInput
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	var n models.Notification
-	if err := h.db.First(&n, input.ID).Error; err != nil {
+	n, err := h.notifs.GetByID(input.ID)
+	if err != nil {
 		return nil, huma.Error404NotFound("notification not found")
 	}
 	if n.RecipientID != userID {
@@ -110,11 +130,11 @@ func (h *NotificationHandler) markRead(ctx context.Context, input *markReadInput
 	}
 
 	n.Read = true
-	if err := h.db.Save(&n).Error; err != nil {
+	if err := h.notifs.Save(n); err != nil {
 		return nil, huma.Error500InternalServerError("could not update notification")
 	}
 
-	return &markReadOutput{Body: n}, nil
+	return &markReadOutput{Body: *n}, nil
 }
 
 func (h *NotificationHandler) markAllRead(ctx context.Context, _ *struct{}) (*markAllReadOutput, error) {
@@ -123,9 +143,7 @@ func (h *NotificationHandler) markAllRead(ctx context.Context, _ *struct{}) (*ma
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	if err := h.db.Model(&models.Notification{}).
-		Where("recipient_id = ? AND read = ?", userID, false).
-		Update("read", true).Error; err != nil {
+	if err := h.notifs.MarkAllReadForRecipient(userID); err != nil {
 		return nil, huma.Error500InternalServerError("could not update notifications")
 	}
 

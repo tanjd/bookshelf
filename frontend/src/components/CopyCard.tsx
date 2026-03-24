@@ -28,8 +28,8 @@ const statusLabel: Record<Copy['status'], string> = {
   unavailable: 'Unavailable',
 }
 
-const statusVariant: Record<Copy['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  available: 'default',
+const statusVariant: Record<Copy['status'], 'success' | 'secondary' | 'destructive' | 'outline'> = {
+  available: 'success',
   requested: 'secondary',
   loaned: 'destructive',
   unavailable: 'outline',

@@ -5,7 +5,7 @@ const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8000";
 
 async function proxy(req: NextRequest, segments: string[]): Promise<NextResponse> {
   const { search } = new URL(req.url);
-  const target = `${BACKEND_URL}/api/${segments.join("/")}${search}`;
+  const target = `${BACKEND_URL}/${segments.join("/")}${search}`;
 
   const headers = new Headers(req.headers);
   headers.delete("host"); // don't forward the frontend's host header
@@ -37,6 +37,20 @@ export async function GET(
 }
 
 export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> },
+) {
+  return proxy(req, (await params).path);
+}
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> },
+) {
+  return proxy(req, (await params).path);
+}
+
+export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> },
 ) {

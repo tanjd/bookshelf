@@ -2,34 +2,44 @@ package handlers
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
-	"gorm.io/gorm"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
 	"github.com/tanjd/bookshelf/internal/models"
+	"github.com/tanjd/bookshelf/internal/repository"
 	"github.com/tanjd/bookshelf/internal/services"
 )
 
 // LoanRequestHandler holds dependencies for loan-request routes.
 type LoanRequestHandler struct {
-	db       *gorm.DB
+	copies   repository.CopyRepository
+	loanReqs repository.LoanRequestRepository
+	admin    repository.AdminRepository
 	workflow *services.LoanWorkflow
 }
 
 // NewLoanRequestHandler creates a new LoanRequestHandler.
-func NewLoanRequestHandler(db *gorm.DB, workflow *services.LoanWorkflow) *LoanRequestHandler {
-	return &LoanRequestHandler{db: db, workflow: workflow}
+func NewLoanRequestHandler(
+	copies repository.CopyRepository,
+	loanReqs repository.LoanRequestRepository,
+	admin repository.AdminRepository,
+	workflow *services.LoanWorkflow,
+) *LoanRequestHandler {
+	return &LoanRequestHandler{copies: copies, loanReqs: loanReqs, admin: admin, workflow: workflow}
 }
 
 // --- Input / Output types ---
 
 type createLoanRequestInput struct {
 	Body struct {
-		CopyID  uint   `json:"copy_id" required:"true" minimum:"1" doc:"ID of the copy to borrow"`
-		Message string `json:"message,omitempty" maxLength:"500" doc:"Optional message to the owner"`
+		CopyID             uint    `json:"copy_id" required:"true" minimum:"1" doc:"ID of the copy to borrow"`
+		Message            string  `json:"message,omitempty" maxLength:"500" doc:"Optional message to the owner"`
+		ExpectedReturnDate *string `json:"expected_return_date,omitempty" doc:"Expected return date (YYYY-MM-DD), required when copy has return_date_required"`
 	}
 }
 
@@ -59,25 +69,48 @@ type loanRequestCopyResponse struct {
 }
 
 type getLoanRequestBody struct {
-	ID          uint                    `json:"id"`
-	CopyID      uint                    `json:"copy_id"`
-	BorrowerID  uint                    `json:"borrower_id"`
-	Message     string                  `json:"message"`
-	Status      string                  `json:"status"`
-	RequestedAt time.Time               `json:"requested_at"`
-	RespondedAt *time.Time              `json:"responded_at"`
-	LoanedAt    *time.Time              `json:"loaned_at"`
-	ReturnedAt  *time.Time              `json:"returned_at"`
-	Copy        loanRequestCopyResponse `json:"copy"`
-	Borrower    safeUser                `json:"borrower"`
+	ID                 uint                    `json:"id"`
+	CopyID             uint                    `json:"copy_id"`
+	BorrowerID         uint                    `json:"borrower_id"`
+	Message            string                  `json:"message"`
+	Status             string                  `json:"status"`
+	RequestedAt        time.Time               `json:"requested_at"`
+	RespondedAt        *time.Time              `json:"responded_at"`
+	LoanedAt           *time.Time              `json:"loaned_at"`
+	ReturnedAt         *time.Time              `json:"returned_at"`
+	ExpectedReturnDate *time.Time              `json:"expected_return_date,omitempty"`
+	Copy               loanRequestCopyResponse `json:"copy"`
+	Borrower           safeUser                `json:"borrower"`
 }
 
 type getLoanRequestOutput struct{ Body getLoanRequestBody }
 
+type listLoanRequestsInput struct {
+	CopyID uint `query:"copy_id" minimum:"1" doc:"Copy ID to list requests for (owner only)"`
+}
+
+type listLoanRequestsOutput struct{ Body []getLoanRequestBody }
+
+type listMineInput struct {
+	Page     int `query:"page" minimum:"1" doc:"Page number (default 1)"`
+	PageSize int `query:"page_size" minimum:"1" maximum:"100" doc:"Items per page (default 20)"`
+}
+
+type listMineOutput struct {
+	Body struct {
+		Items      []getLoanRequestBody `json:"items"`
+		Total      int64                `json:"total"`
+		Page       int                  `json:"page"`
+		PageSize   int                  `json:"page_size"`
+		TotalPages int                  `json:"total_pages"`
+	}
+}
+
 type updateLoanRequestInput struct {
 	ID   uint `path:"id" doc:"Loan request ID"`
 	Body struct {
-		Status string `json:"status" required:"true" doc:"New status: accepted, rejected, returned, or cancelled"`
+		Status       string `json:"status" required:"true" doc:"New status: accepted, rejected, returned, or cancelled"`
+		NewCondition string `json:"new_condition,omitempty" doc:"Updated copy condition on return: good, fair, or worn"`
 	}
 }
 
@@ -87,6 +120,24 @@ type updateLoanRequestOutput struct{ Body models.LoanRequest }
 
 // RegisterRoutes registers all loan-request routes on the given huma API.
 func (h *LoanRequestHandler) RegisterRoutes(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "list-my-loan-requests",
+		Method:      "GET",
+		Path:        "/loan-requests/mine",
+		Tags:        []string{"loan-requests"},
+		Summary:     "List all loan requests made by the authenticated user (paginated)",
+		Security:    []map[string][]string{{"bearer": {}}},
+	}, h.listMine)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-loan-requests",
+		Method:      "GET",
+		Path:        "/loan-requests",
+		Tags:        []string{"loan-requests"},
+		Summary:     "List loan requests for a copy (owner only)",
+		Security:    []map[string][]string{{"bearer": {}}},
+	}, h.listLoanRequests)
+
 	huma.Register(api, huma.Operation{
 		OperationID:   "create-loan-request",
 		Method:        "POST",
@@ -118,21 +169,165 @@ func (h *LoanRequestHandler) RegisterRoutes(api huma.API) {
 
 // --- Handlers ---
 
+func (h *LoanRequestHandler) listMine(ctx context.Context, input *listMineInput) (*listMineOutput, error) {
+	callerID, err := middleware.GetRequiredUserID(ctx)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("authentication required")
+	}
+
+	page := input.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := input.PageSize
+	if pageSize < 1 {
+		pageSize = 20
+	}
+
+	result, err := h.loanReqs.ListByBorrowerIDPaginated(callerID, page, pageSize)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not fetch loan requests")
+	}
+
+	bodies := make([]getLoanRequestBody, len(result.Items))
+	for i, lr := range result.Items {
+		borrowerResp := safeUser{ID: lr.Borrower.ID, Name: lr.Borrower.Name}
+		ownerResp := safeUser{ID: lr.Copy.Owner.ID, Name: lr.Copy.Owner.Name}
+		if lr.Status == "accepted" {
+			borrowerResp.Email = lr.Borrower.Email
+			borrowerResp.Phone = lr.Borrower.Phone
+			ownerResp.Email = lr.Copy.Owner.Email
+			ownerResp.Phone = lr.Copy.Owner.Phone
+		}
+		bodies[i] = getLoanRequestBody{
+			ID:                 lr.ID,
+			CopyID:             lr.CopyID,
+			BorrowerID:         lr.BorrowerID,
+			Message:            lr.Message,
+			Status:             lr.Status,
+			RequestedAt:        lr.RequestedAt,
+			RespondedAt:        lr.RespondedAt,
+			LoanedAt:           lr.LoanedAt,
+			ReturnedAt:         lr.ReturnedAt,
+			ExpectedReturnDate: lr.ExpectedReturnDate,
+			Copy: loanRequestCopyResponse{
+				ID:        lr.Copy.ID,
+				BookID:    lr.Copy.BookID,
+				OwnerID:   lr.Copy.OwnerID,
+				Condition: lr.Copy.Condition,
+				Notes:     lr.Copy.Notes,
+				Status:    lr.Copy.Status,
+				Book:      lr.Copy.Book,
+				Owner:     ownerResp,
+			},
+			Borrower: borrowerResp,
+		}
+	}
+
+	var out listMineOutput
+	out.Body.Items = bodies
+	out.Body.Total = result.Total
+	out.Body.Page = result.Page
+	out.Body.PageSize = result.PageSize
+	out.Body.TotalPages = result.TotalPages
+	return &out, nil
+}
+
+func (h *LoanRequestHandler) listLoanRequests(ctx context.Context, input *listLoanRequestsInput) (*listLoanRequestsOutput, error) {
+	callerID, err := middleware.GetRequiredUserID(ctx)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("authentication required")
+	}
+
+	bookCopy, err := h.copies.GetByID(input.CopyID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("copy not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch copy")
+	}
+	if bookCopy.OwnerID != callerID {
+		return nil, huma.Error403Forbidden("only the copy owner can list requests")
+	}
+
+	requests, err := h.loanReqs.ListByCopyID(input.CopyID)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not fetch loan requests")
+	}
+
+	bodies := make([]getLoanRequestBody, len(requests))
+	for i, lr := range requests {
+		borrowerResp := safeUser{ID: lr.Borrower.ID, Name: lr.Borrower.Name}
+		ownerResp := safeUser{ID: lr.Copy.Owner.ID, Name: lr.Copy.Owner.Name}
+		if lr.Status == "accepted" {
+			borrowerResp.Email = lr.Borrower.Email
+			borrowerResp.Phone = lr.Borrower.Phone
+			ownerResp.Email = lr.Copy.Owner.Email
+			ownerResp.Phone = lr.Copy.Owner.Phone
+		}
+		bodies[i] = getLoanRequestBody{
+			ID:                 lr.ID,
+			CopyID:             lr.CopyID,
+			BorrowerID:         lr.BorrowerID,
+			Message:            lr.Message,
+			Status:             lr.Status,
+			RequestedAt:        lr.RequestedAt,
+			RespondedAt:        lr.RespondedAt,
+			LoanedAt:           lr.LoanedAt,
+			ReturnedAt:         lr.ReturnedAt,
+			ExpectedReturnDate: lr.ExpectedReturnDate,
+			Copy: loanRequestCopyResponse{
+				ID:        lr.Copy.ID,
+				BookID:    lr.Copy.BookID,
+				OwnerID:   lr.Copy.OwnerID,
+				Condition: lr.Copy.Condition,
+				Notes:     lr.Copy.Notes,
+				Status:    lr.Copy.Status,
+				Book:      lr.Copy.Book,
+				Owner:     ownerResp,
+			},
+			Borrower: borrowerResp,
+		}
+	}
+	return &listLoanRequestsOutput{Body: bodies}, nil
+}
+
 func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *createLoanRequestInput) (*createLoanRequestOutput, error) {
 	borrowerID, err := middleware.GetRequiredUserID(ctx)
 	if err != nil {
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	var bookCopy models.Copy
-	if err := h.db.First(&bookCopy, input.Body.CopyID).Error; err != nil {
-		return nil, huma.Error404NotFound("copy not found")
+	bookCopy, err := h.copies.GetByID(input.Body.CopyID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("copy not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch copy")
 	}
 	if bookCopy.OwnerID == borrowerID {
 		return nil, huma.Error400BadRequest("you cannot request your own copy")
 	}
 	if bookCopy.Status != "available" {
 		return nil, huma.Error400BadRequest("copy is not available")
+	}
+
+	// Enforce max active loans setting (0 = unlimited).
+	if maxStr, err := h.admin.GetSetting("max_active_loans"); err == nil && maxStr != "" && maxStr != "0" {
+		var maxLoans int64
+		if _, scanErr := fmt.Sscanf(maxStr, "%d", &maxLoans); scanErr == nil && maxLoans > 0 {
+			activeCount, countErr := h.loanReqs.CountActiveLoansByBorrower(borrowerID)
+			if countErr == nil && activeCount >= maxLoans {
+				return nil, huma.Error422UnprocessableEntity(
+					fmt.Sprintf("you have reached the maximum of %d active loan(s)", maxLoans),
+				)
+			}
+		}
+	}
+
+	// Validate return date requirement.
+	if bookCopy.ReturnDateRequired && input.Body.ExpectedReturnDate == nil {
+		return nil, huma.Error400BadRequest("return date is required by the sharer")
 	}
 
 	lr := models.LoanRequest{
@@ -142,18 +337,47 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 		Status:      "pending",
 		RequestedAt: time.Now(),
 	}
-	if err := h.db.Create(&lr).Error; err != nil {
+
+	if input.Body.ExpectedReturnDate != nil {
+		t, parseErr := time.Parse("2006-01-02", *input.Body.ExpectedReturnDate)
+		if parseErr != nil {
+			return nil, huma.Error400BadRequest("expected_return_date must be in YYYY-MM-DD format")
+		}
+		lr.ExpectedReturnDate = &t
+	}
+
+	if err := h.loanReqs.Create(&lr); err != nil {
 		return nil, huma.Error500InternalServerError("could not create loan request")
 	}
 
 	// Mark copy as requested.
-	h.db.Model(&bookCopy).Update("status", "requested")
+	h.copies.UpdateStatus(bookCopy.ID, "requested") //nolint:errcheck,gosec
 
 	// Load associations needed by the workflow.
-	h.db.Preload("Copy.Owner").Preload("Borrower").First(&lr, lr.ID)
+	loaded, _ := h.loanReqs.GetByIDWithCopyOwnerAndBorrower(lr.ID)
+	if loaded != nil {
+		lr = *loaded
+	}
 
 	if err := h.workflow.OnRequested(&lr); err != nil {
 		slog.ErrorContext(ctx, "workflow.OnRequested failed", "error", err)
+	}
+
+	// Auto-approve if enabled.
+	if bookCopy.AutoApprove {
+		now := time.Now()
+		lr.Status = "accepted"
+		lr.RespondedAt = &now
+		if saveErr := h.loanReqs.Save(&lr); saveErr != nil {
+			slog.ErrorContext(ctx, "auto-approve save failed", "error", saveErr)
+		} else {
+			if wErr := h.workflow.OnAccepted(&lr); wErr != nil {
+				slog.ErrorContext(ctx, "workflow.OnAccepted failed for auto-approve", "error", wErr)
+			}
+			if reloaded, relErr := h.loanReqs.GetByIDWithCopyOwnerAndBorrower(lr.ID); relErr == nil {
+				lr = *reloaded
+			}
+		}
 	}
 
 	return &createLoanRequestOutput{Body: lr}, nil
@@ -165,9 +389,12 @@ func (h *LoanRequestHandler) getLoanRequest(ctx context.Context, input *getLoanR
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	var lr models.LoanRequest
-	if err := h.db.Preload("Copy.Book").Preload("Copy.Owner").Preload("Borrower").First(&lr, input.ID).Error; err != nil {
-		return nil, huma.Error404NotFound("loan request not found")
+	lr, err := h.loanReqs.GetByIDWithFullAssociations(input.ID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("loan request not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch loan request")
 	}
 
 	ownerID := lr.Copy.OwnerID
@@ -187,15 +414,16 @@ func (h *LoanRequestHandler) getLoanRequest(ctx context.Context, input *getLoanR
 	}
 
 	body := getLoanRequestBody{
-		ID:          lr.ID,
-		CopyID:      lr.CopyID,
-		BorrowerID:  lr.BorrowerID,
-		Message:     lr.Message,
-		Status:      lr.Status,
-		RequestedAt: lr.RequestedAt,
-		RespondedAt: lr.RespondedAt,
-		LoanedAt:    lr.LoanedAt,
-		ReturnedAt:  lr.ReturnedAt,
+		ID:                 lr.ID,
+		CopyID:             lr.CopyID,
+		BorrowerID:         lr.BorrowerID,
+		Message:            lr.Message,
+		Status:             lr.Status,
+		RequestedAt:        lr.RequestedAt,
+		RespondedAt:        lr.RespondedAt,
+		LoanedAt:           lr.LoanedAt,
+		ReturnedAt:         lr.ReturnedAt,
+		ExpectedReturnDate: lr.ExpectedReturnDate,
 		Copy: loanRequestCopyResponse{
 			ID:        lr.Copy.ID,
 			BookID:    lr.Copy.BookID,
@@ -218,9 +446,12 @@ func (h *LoanRequestHandler) updateLoanRequest(ctx context.Context, input *updat
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
-	var lr models.LoanRequest
-	if err := h.db.Preload("Copy").Preload("Borrower").First(&lr, input.ID).Error; err != nil {
-		return nil, huma.Error404NotFound("loan request not found")
+	lr, err := h.loanReqs.GetByIDWithCopyAndBorrower(input.ID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("loan request not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch loan request")
 	}
 
 	ownerID := lr.Copy.OwnerID
@@ -246,6 +477,17 @@ func (h *LoanRequestHandler) updateLoanRequest(ctx context.Context, input *updat
 		}
 		lr.Status = "returned"
 		lr.ReturnedAt = &now
+		// Update copy condition if provided.
+		if cond := input.Body.NewCondition; cond != "" {
+			allowed := map[string]bool{"good": true, "fair": true, "worn": true}
+			if !allowed[cond] {
+				return nil, huma.Error400BadRequest("new_condition must be good, fair, or worn")
+			}
+			lr.Copy.Condition = cond
+			if saveErr := h.copies.Save(&lr.Copy); saveErr != nil {
+				slog.ErrorContext(ctx, "failed to update copy condition on return", "error", saveErr)
+			}
+		}
 
 	case "cancelled":
 		if callerID != lr.BorrowerID {
@@ -260,7 +502,7 @@ func (h *LoanRequestHandler) updateLoanRequest(ctx context.Context, input *updat
 		return nil, huma.Error400BadRequest("invalid status transition")
 	}
 
-	if err := h.db.Save(&lr).Error; err != nil {
+	if err := h.loanReqs.Save(lr); err != nil {
 		return nil, huma.Error500InternalServerError("could not update loan request")
 	}
 
@@ -268,17 +510,17 @@ func (h *LoanRequestHandler) updateLoanRequest(ctx context.Context, input *updat
 	var workflowErr error
 	switch lr.Status {
 	case "accepted":
-		workflowErr = h.workflow.OnAccepted(&lr)
+		workflowErr = h.workflow.OnAccepted(lr)
 	case "rejected":
-		workflowErr = h.workflow.OnRejected(&lr)
+		workflowErr = h.workflow.OnRejected(lr)
 	case "cancelled":
-		workflowErr = h.workflow.OnCancelled(&lr)
+		workflowErr = h.workflow.OnCancelled(lr)
 	case "returned":
-		workflowErr = h.workflow.OnReturned(&lr)
+		workflowErr = h.workflow.OnReturned(lr)
 	}
 	if workflowErr != nil {
 		slog.ErrorContext(ctx, "workflow side-effect failed", "status", lr.Status, "error", workflowErr)
 	}
 
-	return &updateLoanRequestOutput{Body: lr}, nil
+	return &updateLoanRequestOutput{Body: *lr}, nil
 }

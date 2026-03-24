@@ -4,7 +4,7 @@ import { useState, type FormEvent } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { api } from "@/lib/api"
+import { api, validatePassword } from "@/lib/api"
 import {
   Card,
   CardHeader,
@@ -21,12 +21,22 @@ export default function RegisterPage() {
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setError("")
+    const passwordError = validatePassword(password)
+    if (passwordError) {
+      setError(passwordError)
+      return
+    }
+    if (password !== confirmPassword) {
+      setError("Passwords do not match")
+      return
+    }
     setLoading(true)
     try {
       const { token, user } = await api.register({ name, email, password })
@@ -89,10 +99,26 @@ export default function RegisterPage() {
                 type="password"
                 autoComplete="new-password"
                 required
-                minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="At least 8 characters"
+              />
+              <p className="text-xs text-muted-foreground">
+                At least 8 characters with uppercase, lowercase, and a number.
+              </p>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="confirm-password" className="text-sm font-medium">
+                Confirm password
+              </label>
+              <Input
+                id="confirm-password"
+                type="password"
+                autoComplete="new-password"
+                required
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter your password"
               />
             </div>
             {error && (

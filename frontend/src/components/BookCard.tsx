@@ -37,7 +37,7 @@ export function BookCard({ book }: BookCardProps) {
           )}
           {typeof book.available_copies === 'number' && (
             <div className="mt-1">
-              <Badge variant={book.available_copies > 0 ? "default" : "secondary"}>
+              <Badge variant={book.available_copies > 0 ? "success" : "secondary"}>
                 {book.available_copies > 0
                   ? `${book.available_copies} available`
                   : "Unavailable"}

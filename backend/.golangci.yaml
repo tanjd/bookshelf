@@ -1,0 +1,49 @@
+version: "2"
+linters:
+  settings:
+    revive:
+      rules:
+        # Interface implementations don't need doc comments;
+        # documentation lives on the repository interfaces.
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+  enable:
+    - asciicheck
+    - bodyclose
+    - errcheck
+    - errname
+    - gocritic
+    - gosec
+    - ineffassign
+    - misspell
+    - noctx
+    - revive
+    - rowserrcheck
+    - staticcheck
+    - unused
+    - wastedassign
+    - whitespace
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - build$
+issues:
+  exclude-dirs:
+    - vendor
+  exclusions:
+    rules:
+      # Interface implementations in the gorm package don't need redundant
+      # doc comments — documentation lives on the repository interfaces.
+      - path: "internal/repository/gorm"
+        linters:
+          - revive
+        text: "(exported|package-comments)"
