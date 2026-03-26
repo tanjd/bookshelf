@@ -38,7 +38,6 @@ ENV HOSTNAME="0.0.0.0"
 
 COPY --from=builder --chown=appuser:appuser /app/.next/standalone ./
 COPY --from=builder --chown=appuser:appuser /app/.next/static ./.next/static
-COPY --from=builder --chown=appuser:appuser /app/public ./public
 
 USER appuser
 
