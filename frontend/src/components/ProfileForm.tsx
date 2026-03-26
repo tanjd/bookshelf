@@ -2,10 +2,11 @@
 
 import { useEffect, useState, type FormEvent } from "react"
 import Link from "next/link"
+import { CheckCircle2, XCircle } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import { api, validatePassword } from "@/lib/api"
-import type { User } from "@/lib/types"
+import type { User, VerificationStatus } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -23,6 +24,7 @@ export function ProfileForm() {
   const router = useRouter()
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
+  const [verificationStatus, setVerificationStatus] = useState<VerificationStatus | null>(null)
 
   // Profile form
   const [name, setName] = useState("")
@@ -40,6 +42,7 @@ export function ProfileForm() {
   // Google Books API key
   const [gbKey, setGbKey] = useState("")
   const [savingGbKey, setSavingGbKey] = useState(false)
+  const [testingGbKey, setTestingGbKey] = useState(false)
 
   // OTP
   const [otpSent, setOtpSent] = useState(false)
@@ -53,9 +56,10 @@ export function ProfileForm() {
       router.push("/login")
       return
     }
-    api.me()
-      .then((u) => {
+    Promise.all([api.me(), api.myVerificationStatus()])
+      .then(([u, vs]) => {
         setUser(u)
+        setVerificationStatus(vs)
         setName(u.name)
         setEmail(u.email)
         setPhone(u.phone?.startsWith("+65") ? u.phone.slice(3).trim() : (u.phone ?? ""))
@@ -77,7 +81,9 @@ export function ProfileForm() {
         email: email.trim() || undefined,
         phone: fullPhone,
       })
+      const vs = await api.myVerificationStatus()
       setUser(updated)
+      setVerificationStatus(vs)
       localStorage.setItem("bookshelf_user", JSON.stringify(updated))
       toast.success("Profile updated")
     } catch (err) {
@@ -124,6 +130,22 @@ export function ProfileForm() {
     }
   }
 
+  async function handleTestGBKey() {
+    setTestingGbKey(true)
+    try {
+      const result = await api.testGoogleBooksKey(gbKey.trim() || undefined)
+      if (result.ok) {
+        toast.success("API key is valid")
+      } else {
+        toast.error(result.message ?? "API key is invalid")
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Test failed")
+    } finally {
+      setTestingGbKey(false)
+    }
+  }
+
   async function handleSaveGBKey(e: FormEvent) {
     e.preventDefault()
     setSavingGbKey(true)
@@ -157,7 +179,9 @@ export function ProfileForm() {
     setVerifyingOtp(true)
     try {
       const updated = await api.verifyOTP(otpCode.trim())
+      const vs = await api.myVerificationStatus()
       setUser(updated)
+      setVerificationStatus(vs)
       localStorage.setItem("bookshelf_user", JSON.stringify(updated))
       setOtpSent(false)
       setOtpCode("")
@@ -198,9 +222,13 @@ export function ProfileForm() {
         <div className="flex flex-col gap-1">
           <h1 className="text-xl font-bold">{user.name}</h1>
           <p className="text-sm text-muted-foreground">{user.email}</p>
-          {user.verified
-            ? <Badge variant="success" className="w-fit">Verified</Badge>
-            : <Badge variant="secondary" className="w-fit">Unverified</Badge>}
+          {verificationStatus
+            ? verificationStatus.eligible
+              ? <Badge variant="success" className="w-fit">Verified</Badge>
+              : <Badge variant="secondary" className="w-fit">Unverified</Badge>
+            : user.verified
+              ? <Badge variant="success" className="w-fit">Verified</Badge>
+              : <Badge variant="secondary" className="w-fit">Unverified</Badge>}
         </div>
       </div>
 
@@ -317,6 +345,14 @@ export function ProfileForm() {
                     placeholder={user.google_books_key_configured ? "Enter new key to replace" : "Paste your API key"}
                   />
                   <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={testingGbKey || savingGbKey || (!gbKey.trim() && !user.google_books_key_configured)}
+                      onClick={handleTestGBKey}
+                    >
+                      {testingGbKey ? "Testing…" : "Test"}
+                    </Button>
                     <Button type="submit" disabled={savingGbKey || !gbKey.trim()}>
                       {savingGbKey ? "Saving…" : "Save key"}
                     </Button>
@@ -370,6 +406,53 @@ export function ProfileForm() {
                   )
                 )}
               </div>
+
+              {/* Verification requirements checklist */}
+              {verificationStatus && verificationStatus.factors.length > 0 && (
+                <>
+                  <Separator />
+                  <div className="flex flex-col gap-3">
+                    <div>
+                      <p className="text-sm font-medium">Borrowing requirements</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Complete all requirements to borrow books from the community.
+                      </p>
+                    </div>
+                    <ul className="flex flex-col gap-2">
+                      {verificationStatus.factors.map((factor) => (
+                        <li key={factor.key} className="flex items-start gap-2">
+                          {factor.satisfied
+                            ? <CheckCircle2 className="size-4 text-green-600 mt-0.5 shrink-0" />
+                            : <XCircle className="size-4 text-muted-foreground mt-0.5 shrink-0" />}
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`text-sm ${factor.satisfied ? "text-foreground" : "text-muted-foreground"}`}>
+                              {factor.key === "min_books_shared" && factor.target != null
+                                ? `${factor.label} (${factor.current ?? 0}/${factor.target})`
+                                : factor.label}
+                            </span>
+                            {!factor.satisfied && factor.key === "email" && (
+                              <span className="text-xs text-muted-foreground">Use the email verification section above</span>
+                            )}
+                            {!factor.satisfied && factor.key === "phone" && (
+                              <span className="text-xs text-muted-foreground">
+                                Add your phone number in the{" "}
+                                <button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={() => document.querySelector<HTMLElement>('[data-value="profile"]')?.click()}>
+                                  Profile tab
+                                </button>
+                              </span>
+                            )}
+                            {!factor.satisfied && factor.key === "min_books_shared" && (
+                              <Link href="/share" className="text-xs underline underline-offset-2 hover:text-foreground">
+                                Share a book →
+                              </Link>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

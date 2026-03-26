@@ -93,7 +93,7 @@ func main() {
 	}
 
 	// Handlers
-	authH := handlers.NewAuthHandler(userRepo, adminRepo, cfg.JWTSecret, emailSvc)
+	authH := handlers.NewAuthHandler(userRepo, adminRepo, copyRepo, cfg.JWTSecret, emailSvc)
 	metadataH := handlers.NewMetadataHandler(cfg.GoogleBooksAPIKey, cfg.JWTSecret, userRepo)
 	bookH := handlers.NewBookHandler(bookRepo, userRepo, coversDir)
 	copyH := handlers.NewCopyHandler(copyRepo, userRepo, notifRepo, waitlistRepo, adminRepo)

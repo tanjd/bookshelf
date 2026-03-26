@@ -4,6 +4,7 @@ export interface User {
   email: string
   phone: string
   verified: boolean
+  suspended: boolean
   role: 'user' | 'admin'
   created_at: string
   google_books_key_configured: boolean
@@ -128,6 +129,20 @@ export interface BookMetadataResult {
   ol_key: string
   google_books_id: string
   bookbrainz_id?: string
+}
+
+export interface VerificationFactor {
+  key: 'email' | 'phone' | 'min_books_shared'
+  label: string
+  required: boolean
+  satisfied: boolean
+  target?: number
+  current?: number
+}
+
+export interface VerificationStatus {
+  eligible: boolean
+  factors: VerificationFactor[]
 }
 
 export interface MetadataProviderStatus {
