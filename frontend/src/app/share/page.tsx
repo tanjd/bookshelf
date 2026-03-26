@@ -25,7 +25,7 @@ type Step = 'search' | 'confirm' | 'manual'
 interface SelectedBook {
   olKey: string
   googleBooksId: string
-  source: 'openlibrary' | 'google_books'
+  source: 'openlibrary' | 'google_books' | 'bookbrainz'
   title: string
   author: string
   isbn: string
@@ -90,6 +90,7 @@ export default function SharePage() {
   const [notes, setNotes] = useState("")
   const [autoApprove, setAutoApprove] = useState(false)
   const [returnDateRequired, setReturnDateRequired] = useState(false)
+  const [hideOwner, setHideOwner] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSelectResult(result: BookMetadataResult) {
@@ -146,6 +147,7 @@ export default function SharePage() {
         notes: notes.trim() || undefined,
         auto_approve: autoApprove || undefined,
         return_date_required: returnDateRequired || undefined,
+        hide_owner: hideOwner || undefined,
       })
 
       toast.success("Book shared! It's now in the catalog.")
@@ -165,6 +167,7 @@ export default function SharePage() {
   const [manualNotes, setManualNotes] = useState("")
   const [manualAutoApprove, setManualAutoApprove] = useState(false)
   const [manualReturnDateRequired, setManualReturnDateRequired] = useState(false)
+  const [manualHideOwner, setManualHideOwner] = useState(false)
   const [manualSubmitting, setManualSubmitting] = useState(false)
 
   async function handleManualSubmit() {
@@ -185,6 +188,7 @@ export default function SharePage() {
         notes: manualNotes.trim() || undefined,
         auto_approve: manualAutoApprove || undefined,
         return_date_required: manualReturnDateRequired || undefined,
+        hide_owner: manualHideOwner || undefined,
       })
       toast.success("Book shared!")
       router.push("/my-books")
@@ -281,6 +285,15 @@ export default function SharePage() {
                 className="accent-primary"
               />
               <span className="text-sm">Require return date from borrower</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={manualHideOwner}
+                onChange={(e) => setManualHideOwner(e.target.checked)}
+                className="accent-primary"
+              />
+              <span className="text-sm">Keep me anonymous (hide my name from borrowers)</span>
             </label>
           </div>
 
@@ -389,6 +402,15 @@ export default function SharePage() {
                 className="accent-primary"
               />
               <span className="text-sm">Require return date from borrower</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={hideOwner}
+                onChange={(e) => setHideOwner(e.target.checked)}
+                className="accent-primary"
+              />
+              <span className="text-sm">Keep me anonymous (hide my name from borrowers)</span>
             </label>
           </div>
 
@@ -499,7 +521,10 @@ export default function SharePage() {
       )}
 
       {!searching && query.trim().length >= 3 && searchResults.length === 0 && (
-        <p className="text-sm text-muted-foreground">No results found.</p>
+        <div className="flex flex-col gap-1">
+          <p className="text-sm text-muted-foreground">No results found.</p>
+          <p className="text-xs text-muted-foreground">Metadata providers may be temporarily unavailable. You can still add your book manually below.</p>
+        </div>
       )}
 
       <div className="border-t pt-4">

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
 	"github.com/tanjd/bookshelf/internal/models"
@@ -20,6 +22,7 @@ type LoanRequestHandler struct {
 	copies   repository.CopyRepository
 	loanReqs repository.LoanRequestRepository
 	admin    repository.AdminRepository
+	users    repository.UserRepository
 	workflow *services.LoanWorkflow
 }
 
@@ -28,9 +31,10 @@ func NewLoanRequestHandler(
 	copies repository.CopyRepository,
 	loanReqs repository.LoanRequestRepository,
 	admin repository.AdminRepository,
+	users repository.UserRepository,
 	workflow *services.LoanWorkflow,
 ) *LoanRequestHandler {
-	return &LoanRequestHandler{copies: copies, loanReqs: loanReqs, admin: admin, workflow: workflow}
+	return &LoanRequestHandler{copies: copies, loanReqs: loanReqs, admin: admin, users: users, workflow: workflow}
 }
 
 // --- Input / Output types ---
@@ -325,6 +329,36 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 		}
 	}
 
+	// Load borrower for eligibility checks below.
+	borrower, borrowerErr := h.users.FindByID(borrowerID)
+
+	// Enforce require_verified_to_borrow.
+	if val, _ := h.admin.GetSetting("require_verified_to_borrow"); val == "true" {
+		if borrowerErr != nil || !borrower.Verified {
+			return nil, huma.Error403Forbidden("a verified email is required to borrow books")
+		}
+	}
+
+	// Enforce verification_requires_phone.
+	if val, _ := h.admin.GetSetting("verification_requires_phone"); val == "true" {
+		if borrowerErr != nil || borrower.Phone == "" {
+			return nil, huma.Error403Forbidden("a phone number is required to borrow books")
+		}
+	}
+
+	// Enforce verification_min_books_shared (0 = disabled).
+	if minStr, _ := h.admin.GetSetting("verification_min_books_shared"); minStr != "" && minStr != "0" {
+		var minBooks int64
+		if _, scanErr := fmt.Sscanf(minStr, "%d", &minBooks); scanErr == nil && minBooks > 0 {
+			sharedCount, countErr := h.copies.CountByOwnerID(borrowerID)
+			if countErr == nil && sharedCount < minBooks {
+				return nil, huma.Error403Forbidden(
+					fmt.Sprintf("you must share at least %d book(s) before you can borrow", minBooks),
+				)
+			}
+		}
+	}
+
 	// Validate return date requirement.
 	if bookCopy.ReturnDateRequired && input.Body.ExpectedReturnDate == nil {
 		return nil, huma.Error400BadRequest("return date is required by the sharer")
@@ -366,7 +400,7 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 	// "someone wants to borrow your book" email that is immediately superseded.
 	if !bookCopy.AutoApprove {
 		if err := h.workflow.OnRequested(&lr); err != nil {
-			slog.ErrorContext(ctx, "workflow.OnRequested failed", "error", err)
+			log.Error().Err(err).Msg("workflow.OnRequested failed")
 		}
 	}
 
@@ -376,10 +410,10 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 		lr.Status = "accepted"
 		lr.RespondedAt = &now
 		if saveErr := h.loanReqs.Save(&lr); saveErr != nil {
-			slog.ErrorContext(ctx, "auto-approve save failed", "error", saveErr)
+			log.Error().Err(saveErr).Msg("auto-approve save failed")
 		} else {
 			if wErr := h.workflow.OnAccepted(&lr); wErr != nil {
-				slog.ErrorContext(ctx, "workflow.OnAccepted failed for auto-approve", "error", wErr)
+				log.Error().Err(wErr).Msg("workflow.OnAccepted failed for auto-approve")
 			}
 			if reloaded, relErr := h.loanReqs.GetByIDWithCopyOwnerAndBorrower(lr.ID); relErr == nil {
 				lr = *reloaded
@@ -492,7 +526,7 @@ func (h *LoanRequestHandler) updateLoanRequest(ctx context.Context, input *updat
 			}
 			lr.Copy.Condition = cond
 			if saveErr := h.copies.Save(&lr.Copy); saveErr != nil {
-				slog.ErrorContext(ctx, "failed to update copy condition on return", "error", saveErr)
+				log.Error().Err(saveErr).Msg("failed to update copy condition on return")
 			}
 		}
 
@@ -526,7 +560,7 @@ func (h *LoanRequestHandler) updateLoanRequest(ctx context.Context, input *updat
 		workflowErr = h.workflow.OnReturned(lr)
 	}
 	if workflowErr != nil {
-		slog.ErrorContext(ctx, "workflow side-effect failed", "status", lr.Status, "error", workflowErr)
+		log.Error().Err(workflowErr).Str("status", lr.Status).Msg("workflow side-effect failed")
 	}
 
 	return &updateLoanRequestOutput{Body: *lr}, nil

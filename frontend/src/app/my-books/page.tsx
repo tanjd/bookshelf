@@ -62,6 +62,7 @@ export default function MyBooksPage() {
   const [editStatus, setEditStatus] = useState<string>('available')
   const [editAutoApprove, setEditAutoApprove] = useState(false)
   const [editReturnDateRequired, setEditReturnDateRequired] = useState(false)
+  const [editHideOwner, setEditHideOwner] = useState(false)
   const [editSubmitting, setEditSubmitting] = useState(false)
 
   // Transfer dialog
@@ -132,6 +133,7 @@ export default function MyBooksPage() {
     setEditStatus(copy.status)
     setEditAutoApprove(copy.auto_approve ?? false)
     setEditReturnDateRequired(copy.return_date_required ?? false)
+    setEditHideOwner(copy.hide_owner ?? false)
   }
 
   async function handleEditSave() {
@@ -144,6 +146,7 @@ export default function MyBooksPage() {
         status: editStatus,
         auto_approve: editAutoApprove,
         return_date_required: editReturnDateRequired,
+        hide_owner: editHideOwner,
       })
       toast.success("Copy updated")
       setEditCopy(null)
@@ -418,6 +421,12 @@ export default function MyBooksPage() {
                   onChange={(e) => setEditReturnDateRequired(e.target.checked)}
                   className="accent-primary" />
                 <span className="text-sm">Require return date from borrower</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={editHideOwner}
+                  onChange={(e) => setEditHideOwner(e.target.checked)}
+                  className="accent-primary" />
+                <span className="text-sm">Keep me anonymous (hide my name from borrowers)</span>
               </label>
             </div>
           </div>

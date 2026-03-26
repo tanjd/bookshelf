@@ -108,12 +108,13 @@ For settings or profile pages, open with a hero section: `flex flex-col items-ce
 
 ## Environment
 
-Copy `.env.example` → `.env` for the backend. Key variables:
+Copy `backend/.env.example` → `backend/.env` for the backend. Key variables:
 
 - `JWT_SECRET` — required in production
-- `BACKEND_URL` — used server-side by the Next.js proxy (default: `http://localhost:8000`)
+- `BACKEND_URL` — used server-side by the Next.js proxy (default: `http://localhost:8000`); set in `frontend/.env.local`
 - `RESEND_API_KEY` / `EMAIL_FROM` — optional; disables email if absent
-- `ADMIN_EMAIL` — auto-promotes this registered user to admin on startup
+- `GOOGLE_BOOKS_API_KEY` — optional; Google Books metadata skipped if absent
+- `METADATA_REFRESH_INTERVAL` — background metadata refresh cadence (default: `24h`)
 
 ## Book metadata sources
 

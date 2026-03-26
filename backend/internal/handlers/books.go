@@ -3,9 +3,10 @@ package handlers
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"github.com/danielgtaylor/huma/v2"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
 	"github.com/tanjd/bookshelf/internal/models"
@@ -15,12 +16,13 @@ import (
 // BookHandler holds dependencies for book routes.
 type BookHandler struct {
 	books     repository.BookRepository
+	users     repository.UserRepository
 	coversDir string
 }
 
 // NewBookHandler creates a new BookHandler.
-func NewBookHandler(books repository.BookRepository, coversDir string) *BookHandler {
-	return &BookHandler{books: books, coversDir: coversDir}
+func NewBookHandler(books repository.BookRepository, users repository.UserRepository, coversDir string) *BookHandler {
+	return &BookHandler{books: books, users: users, coversDir: coversDir}
 }
 
 // bookResponse wraps a Book and adds the computed available_copies count.
@@ -180,7 +182,7 @@ func (h *BookHandler) listRecentBooks(_ context.Context, input *listRecentBooksI
 	return &listRecentBooksOutput{Body: resp}, nil
 }
 
-func (h *BookHandler) getBook(_ context.Context, input *getBookInput) (*getBookOutput, error) {
+func (h *BookHandler) getBook(ctx context.Context, input *getBookInput) (*getBookOutput, error) {
 	book, err := h.books.GetByIDWithCopies(input.ID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -189,11 +191,26 @@ func (h *BookHandler) getBook(_ context.Context, input *getBookInput) (*getBookO
 		return nil, huma.Error500InternalServerError("could not fetch book")
 	}
 
-	// Redact sensitive owner fields — expose name only.
+	// Determine whether the requesting user can see owner names.
+	// Requires: authenticated + email-verified.
+	canSeeOwner := false
+	if userID := middleware.GetUserID(ctx); userID != 0 {
+		if u, lookupErr := h.users.FindByID(userID); lookupErr == nil && u.Verified {
+			canSeeOwner = true
+		}
+	}
+
 	for i := range book.Copies {
-		book.Copies[i].Owner = models.User{
-			ID:   book.Copies[i].Owner.ID,
-			Name: book.Copies[i].Owner.Name,
+		if book.Copies[i].HideOwner || !canSeeOwner {
+			// Strip owner entirely — frontend uses hide_owner flag to distinguish
+			// "anonymous by choice" from "sign in and verify required".
+			book.Copies[i].Owner = models.User{}
+		} else {
+			// Redact sensitive fields — expose name only.
+			book.Copies[i].Owner = models.User{
+				ID:   book.Copies[i].Owner.ID,
+				Name: book.Copies[i].Owner.Name,
+			}
 		}
 	}
 
@@ -220,7 +237,7 @@ func (h *BookHandler) createBook(ctx context.Context, input *createBookInput) (*
 	coverURL := input.Body.CoverURL
 	if h.coversDir != "" && coverURL != "" {
 		if local, err := downloadCover(coverURL, h.coversDir); err != nil {
-			slog.Warn("cover download failed, keeping external url", "err", err)
+			log.Warn().Err(err).Msg("cover download failed, keeping external url")
 		} else if local != "" {
 			coverURL = local
 		}

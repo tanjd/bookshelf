@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState, type FormEvent } from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import { api, validatePassword } from "@/lib/api"
@@ -8,6 +9,8 @@ import type { User } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Separator } from "@/components/ui/separator"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Card,
   CardHeader,
@@ -33,6 +36,10 @@ export function ProfileForm() {
   const [confirmNewPassword, setConfirmNewPassword] = useState("")
   const [pwError, setPwError] = useState("")
   const [changingPw, setChangingPw] = useState(false)
+
+  // Google Books API key
+  const [gbKey, setGbKey] = useState("")
+  const [savingGbKey, setSavingGbKey] = useState(false)
 
   // OTP
   const [otpSent, setOtpSent] = useState(false)
@@ -117,6 +124,34 @@ export function ProfileForm() {
     }
   }
 
+  async function handleSaveGBKey(e: FormEvent) {
+    e.preventDefault()
+    setSavingGbKey(true)
+    try {
+      const updated = await api.updateMe({ google_books_api_key: gbKey.trim() })
+      setUser(updated)
+      setGbKey("")
+      toast.success(gbKey.trim() ? "API key saved" : "API key removed")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save API key")
+    } finally {
+      setSavingGbKey(false)
+    }
+  }
+
+  async function handleRemoveGBKey() {
+    setSavingGbKey(true)
+    try {
+      const updated = await api.updateMe({ google_books_api_key: "" })
+      setUser(updated)
+      toast.success("API key removed")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to remove API key")
+    } finally {
+      setSavingGbKey(false)
+    }
+  }
+
   async function handleVerifyOTP(e: FormEvent) {
     e.preventDefault()
     setVerifyingOtp(true)
@@ -136,17 +171,17 @@ export function ProfileForm() {
 
   if (loading) {
     return (
-      <div className="flex flex-col gap-6 max-w-md mx-auto">
-        <div className="flex flex-col items-center gap-4 py-8">
-          <div className="size-20 rounded-full bg-muted animate-pulse" />
-          <div className="flex flex-col items-center gap-2">
-            <div className="h-7 w-36 rounded bg-muted animate-pulse" />
+      <div className="flex flex-col gap-6 max-w-2xl mx-auto">
+        <div className="flex items-center gap-4 py-6">
+          <div className="size-16 rounded-full bg-muted animate-pulse shrink-0" />
+          <div className="flex flex-col gap-2">
+            <div className="h-6 w-36 rounded bg-muted animate-pulse" />
             <div className="h-4 w-48 rounded bg-muted animate-pulse" />
             <div className="h-5 w-20 rounded-full bg-muted animate-pulse" />
           </div>
         </div>
-        <div className="h-48 rounded-xl bg-muted animate-pulse" />
-        <div className="h-24 rounded-xl bg-muted animate-pulse" />
+        <div className="h-10 w-64 rounded-md bg-muted animate-pulse" />
+        <div className="h-64 rounded-xl bg-muted animate-pulse" />
       </div>
     )
   }
@@ -154,121 +189,191 @@ export function ProfileForm() {
   if (!user) return null
 
   return (
-    <div className="flex flex-col gap-6 max-w-md mx-auto">
+    <div className="flex flex-col gap-6 max-w-2xl mx-auto">
       {/* Hero */}
-      <div className="flex flex-col items-center gap-4 py-8 text-center">
-        <div className="size-20 rounded-full bg-primary/10 flex items-center justify-center text-3xl font-bold text-primary select-none">
+      <div className="flex items-center gap-4 py-6">
+        <div className="size-16 rounded-full bg-primary/10 flex items-center justify-center text-2xl font-bold text-primary select-none shrink-0">
           {user.name.charAt(0).toUpperCase()}
         </div>
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">{user.name}</h1>
+          <h1 className="text-xl font-bold">{user.name}</h1>
           <p className="text-sm text-muted-foreground">{user.email}</p>
+          {user.verified
+            ? <Badge variant="success" className="w-fit">Verified</Badge>
+            : <Badge variant="secondary" className="w-fit">Unverified</Badge>}
         </div>
-        {user.verified
-          ? <Badge variant="success">Verified</Badge>
-          : <Badge variant="secondary">Unverified</Badge>}
       </div>
 
-      {/* Profile form */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Personal information</CardTitle>
-          <CardDescription>Update your name, email, and phone number</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSaveProfile} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="profile-name" className="text-sm font-medium">Name</label>
-              <Input id="profile-name" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="profile-email" className="text-sm font-medium">Email</label>
-              <Input id="profile-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="profile-phone" className="text-sm font-medium">Phone</label>
-              <div className="flex rounded-md border border-input overflow-hidden focus-within:ring-1 focus-within:ring-ring">
-                <span className="flex items-center px-3 bg-muted text-muted-foreground text-sm border-r border-input select-none">+65</span>
-                <input
-                  id="profile-phone"
-                  type="tel"
-                  className="flex-1 px-3 py-2 text-sm outline-none bg-background"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="9123 4567"
-                />
-              </div>
-            </div>
-            <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
-          </form>
-        </CardContent>
-      </Card>
+      <Tabs defaultValue="profile">
+        <TabsList>
+          <TabsTrigger value="profile">Profile</TabsTrigger>
+          <TabsTrigger value="security">Security</TabsTrigger>
+          <TabsTrigger value="integrations">Integrations</TabsTrigger>
+        </TabsList>
 
-      {/* Change password */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Change password</CardTitle>
-          <CardDescription>Update your password. You must enter your current password to confirm.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleChangePassword} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="current-password" className="text-sm font-medium">Current password</label>
-              <Input id="current-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Your current password" />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="new-password" className="text-sm font-medium">New password</label>
-              <Input id="new-password" type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 8 characters" />
-              <p className="text-xs text-muted-foreground">At least 8 characters with uppercase, lowercase, and a number.</p>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="confirm-new-password" className="text-sm font-medium">Confirm new password</label>
-              <Input id="confirm-new-password" type="password" autoComplete="new-password" value={confirmNewPassword} onChange={(e) => setConfirmNewPassword(e.target.value)} placeholder="Re-enter new password" />
-            </div>
-            {pwError && <p className="text-sm text-destructive">{pwError}</p>}
-            <Button type="submit" disabled={changingPw || !currentPassword || !newPassword || !confirmNewPassword}>
-              {changingPw ? "Changing…" : "Change password"}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-
-      {/* Verification */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Email verification</CardTitle>
-          <CardDescription>
-            {user.verified ? "Your email address has been verified." : "Verify your email to unlock borrowing features."}
-          </CardDescription>
-        </CardHeader>
-        {!user.verified && (
-          <CardContent className="flex flex-col gap-4">
-            {!otpSent ? (
-              <Button variant="outline" onClick={handleSendOTP} disabled={sendingOtp}>
-                {sendingOtp ? "Sending…" : "Send verification code"}
-              </Button>
-            ) : (
-              <form onSubmit={handleVerifyOTP} className="flex flex-col gap-3">
-                <p className="text-sm text-muted-foreground">
-                  A 6-digit code was sent to <strong>{user.email}</strong>.
-                </p>
+        {/* Profile tab */}
+        <TabsContent value="profile" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Personal information</CardTitle>
+              <CardDescription>Update your name, email, and phone number</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleSaveProfile} className="flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
-                  <label htmlFor="otp-code" className="text-sm font-medium">Verification code</label>
-                  <Input id="otp-code" type="text" inputMode="numeric" maxLength={6} value={otpCode} onChange={(e) => setOtpCode(e.target.value)} placeholder="123456" />
+                  <label htmlFor="profile-name" className="text-sm font-medium">Name</label>
+                  <Input id="profile-name" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
                 </div>
-                <div className="flex gap-2">
-                  <Button type="submit" disabled={verifyingOtp || otpCode.length !== 6}>
-                    {verifyingOtp ? "Verifying…" : "Verify"}
-                  </Button>
-                  <Button type="button" variant="ghost" onClick={handleSendOTP} disabled={sendingOtp}>
-                    Resend code
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="profile-email" className="text-sm font-medium">Email</label>
+                  <Input id="profile-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="profile-phone" className="text-sm font-medium">Phone</label>
+                  <div className="flex rounded-md border border-input overflow-hidden focus-within:ring-1 focus-within:ring-ring">
+                    <span className="flex items-center px-3 bg-muted text-muted-foreground text-sm border-r border-input select-none">+65</span>
+                    <input
+                      id="profile-phone"
+                      type="tel"
+                      className="flex-1 px-3 py-2 text-sm outline-none bg-background"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="9123 4567"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Security tab */}
+        <TabsContent value="security" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Change password</CardTitle>
+              <CardDescription>Update your password. You must enter your current password to confirm.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleChangePassword} className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="current-password" className="text-sm font-medium">Current password</label>
+                  <Input id="current-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Your current password" />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="new-password" className="text-sm font-medium">New password</label>
+                  <Input id="new-password" type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 8 characters" />
+                  <p className="text-xs text-muted-foreground">At least 8 characters with uppercase, lowercase, and a number.</p>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="confirm-new-password" className="text-sm font-medium">Confirm new password</label>
+                  <Input id="confirm-new-password" type="password" autoComplete="new-password" value={confirmNewPassword} onChange={(e) => setConfirmNewPassword(e.target.value)} placeholder="Re-enter new password" />
+                </div>
+                {pwError && <p className="text-sm text-destructive">{pwError}</p>}
+                <div>
+                  <Button type="submit" disabled={changingPw || !currentPassword || !newPassword || !confirmNewPassword}>
+                    {changingPw ? "Changing…" : "Change password"}
                   </Button>
                 </div>
               </form>
-            )}
-          </CardContent>
-        )}
-      </Card>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Integrations tab */}
+        <TabsContent value="integrations" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Integrations</CardTitle>
+              <CardDescription>Manage external services connected to your account.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-6">
+              {/* Google Books API key */}
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Google Books API Key</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Use your personal quota during book searches. The key is stored encrypted and never exposed.
+                    </p>
+                    <Link href="/about#google-books-api-key" className="text-xs text-primary underline-offset-2 hover:underline mt-0.5 inline-block">
+                      How to get a Google Books API key →
+                    </Link>
+                  </div>
+                  {user.google_books_key_configured
+                    ? <Badge variant="success" className="shrink-0">Configured</Badge>
+                    : <Badge variant="secondary" className="shrink-0">Not configured</Badge>}
+                </div>
+                <form onSubmit={handleSaveGBKey} className="flex flex-col gap-3">
+                  <Input
+                    id="gb-api-key"
+                    type="password"
+                    autoComplete="off"
+                    value={gbKey}
+                    onChange={(e) => setGbKey(e.target.value)}
+                    placeholder={user.google_books_key_configured ? "Enter new key to replace" : "Paste your API key"}
+                  />
+                  <div className="flex gap-2">
+                    <Button type="submit" disabled={savingGbKey || !gbKey.trim()}>
+                      {savingGbKey ? "Saving…" : "Save key"}
+                    </Button>
+                    {user.google_books_key_configured && (
+                      <Button type="button" variant="outline" disabled={savingGbKey} onClick={handleRemoveGBKey}>
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                </form>
+              </div>
+
+              <Separator />
+
+              {/* Email verification */}
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Email verification</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {user.verified ? "Your email address has been verified." : "Verify your email to unlock borrowing features."}
+                    </p>
+                  </div>
+                  {user.verified
+                    ? <Badge variant="success" className="shrink-0">Verified</Badge>
+                    : <Badge variant="secondary" className="shrink-0">Unverified</Badge>}
+                </div>
+                {!user.verified && (
+                  !otpSent ? (
+                    <Button variant="outline" onClick={handleSendOTP} disabled={sendingOtp} className="w-fit">
+                      {sendingOtp ? "Sending…" : "Send verification code"}
+                    </Button>
+                  ) : (
+                    <form onSubmit={handleVerifyOTP} className="flex flex-col gap-3">
+                      <p className="text-sm text-muted-foreground">
+                        A 6-digit code was sent to <strong>{user.email}</strong>.
+                      </p>
+                      <div className="flex flex-col gap-1.5">
+                        <label htmlFor="otp-code" className="text-sm font-medium">Verification code</label>
+                        <Input id="otp-code" type="text" inputMode="numeric" maxLength={6} value={otpCode} onChange={(e) => setOtpCode(e.target.value)} placeholder="123456" />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button type="submit" disabled={verifyingOtp || otpCode.length !== 6}>
+                          {verifyingOtp ? "Verifying…" : "Verify"}
+                        </Button>
+                        <Button type="button" variant="ghost" onClick={handleSendOTP} disabled={sendingOtp}>
+                          Resend code
+                        </Button>
+                      </div>
+                    </form>
+                  )
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

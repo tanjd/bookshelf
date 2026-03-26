@@ -6,19 +6,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
+
+	"github.com/rs/zerolog/log"
 )
 
 // EmailService sends transactional emails via the Resend API.
 type EmailService struct {
-	apiKey string
-	from   string
+	apiKey           string
+	from             string
+	env              string
+	devEmailOverride string
 }
 
 // NewEmailService creates a new EmailService.
-func NewEmailService(apiKey, from string) *EmailService {
-	return &EmailService{apiKey: apiKey, from: from}
+func NewEmailService(apiKey, from, env, devEmailOverride string) *EmailService {
+	return &EmailService{apiKey: apiKey, from: from, env: env, devEmailOverride: devEmailOverride}
 }
 
 type resendPayload struct {
@@ -30,9 +34,14 @@ type resendPayload struct {
 
 // SendEmail posts an email via Resend. If no API key is configured the call is
 // silently skipped.
-func (s *EmailService) SendEmail(to, subject, html string) error {
+func (s *EmailService) SendEmail(recipient, subject, html string) error {
+	to := recipient
+	if s.env == "dev" && s.devEmailOverride != "" {
+		log.Debug().Str("original", recipient).Str("override", to).Msg("email: dev override active")
+		to = s.devEmailOverride
+	}
 	if s.apiKey == "" {
-		log.Printf("[email] skipping send (no RESEND_API_KEY): to=%s subject=%q", to, subject)
+		log.Warn().Str("to", to).Str("subject", subject).Msg("email skipped: RESEND_API_KEY not set")
 		return nil
 	}
 
@@ -61,13 +70,15 @@ func (s *EmailService) SendEmail(to, subject, html string) error {
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("email: close response body: %v", closeErr)
+			log.Warn().Err(closeErr).Msg("email: close response body")
 		}
 	}()
 
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("email: resend returned status %d", resp.StatusCode)
+		return fmt.Errorf("email: resend returned status %d: %s", resp.StatusCode, respBody)
 	}
 
+	log.Debug().Str("to", to).Str("subject", subject).Msg("email sent")
 	return nil
 }

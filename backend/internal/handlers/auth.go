@@ -7,12 +7,14 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"log/slog"
+
 	"math/big"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
@@ -53,13 +55,14 @@ func validatePasswordComplexity(p string) string {
 // AuthHandler holds dependencies for authentication routes.
 type AuthHandler struct {
 	users     repository.UserRepository
+	admin     repository.AdminRepository
 	jwtSecret string
 	email     *services.EmailService
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(users repository.UserRepository, jwtSecret string, email *services.EmailService) *AuthHandler {
-	return &AuthHandler{users: users, jwtSecret: jwtSecret, email: email}
+func NewAuthHandler(users repository.UserRepository, admin repository.AdminRepository, jwtSecret string, email *services.EmailService) *AuthHandler {
+	return &AuthHandler{users: users, admin: admin, jwtSecret: jwtSecret, email: email}
 }
 
 // --- Input / Output types ---
@@ -86,13 +89,19 @@ type authResponse struct {
 
 type authOutput struct{ Body authResponse }
 
-type meOutput struct{ Body models.User }
+type meBody struct {
+	models.User
+	GoogleBooksKeyConfigured bool `json:"google_books_key_configured"`
+}
+
+type meOutput struct{ Body meBody }
 
 type updateMeInput struct {
 	Body struct {
-		Name  *string `json:"name,omitempty" doc:"New display name"`
-		Phone *string `json:"phone,omitempty" doc:"Contact phone number"`
-		Email *string `json:"email,omitempty" format:"email" doc:"New email address"`
+		Name              *string `json:"name,omitempty" doc:"New display name"`
+		Phone             *string `json:"phone,omitempty" doc:"Contact phone number"`
+		Email             *string `json:"email,omitempty" format:"email" doc:"New email address"`
+		GoogleBooksAPIKey *string `json:"google_books_api_key,omitempty" doc:"Your Google Books API key. Set to empty string to remove."`
 	}
 }
 
@@ -213,6 +222,9 @@ func (h *AuthHandler) RegisterRoutes(api huma.API) {
 // --- Handlers ---
 
 func (h *AuthHandler) register(_ context.Context, input *registerInput) (*authOutput, error) {
+	if val, _ := h.admin.GetSetting("allow_registration"); val == "false" {
+		return nil, huma.Error403Forbidden("registration is currently disabled")
+	}
 	if input.Body.Name == "" || input.Body.Email == "" || input.Body.Password == "" {
 		return nil, huma.Error400BadRequest("name, email and password are required")
 	}
@@ -274,7 +286,7 @@ func (h *AuthHandler) me(ctx context.Context, _ *struct{}) (*meOutput, error) {
 		return nil, huma.Error500InternalServerError("could not fetch user")
 	}
 
-	return &meOutput{Body: *user}, nil
+	return &meOutput{Body: meBody{User: *user, GoogleBooksKeyConfigured: user.GoogleBooksAPIKey != ""}}, nil
 }
 
 func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOutput, error) {
@@ -309,11 +321,26 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 		user.OTPExpiry = nil
 	}
 
+	if input.Body.GoogleBooksAPIKey != nil {
+		if *input.Body.GoogleBooksAPIKey == "" {
+			user.GoogleBooksAPIKey = ""
+		} else {
+			if err := validateGoogleBooksAPIKey(*input.Body.GoogleBooksAPIKey); err != nil {
+				return nil, huma.Error422UnprocessableEntity("invalid Google Books API key")
+			}
+			encrypted, err := encryptField(*input.Body.GoogleBooksAPIKey, h.jwtSecret)
+			if err != nil {
+				return nil, huma.Error500InternalServerError("could not save API key")
+			}
+			user.GoogleBooksAPIKey = encrypted
+		}
+	}
+
 	if err := h.users.Save(user); err != nil {
 		return nil, huma.Error500InternalServerError("could not update user")
 	}
 
-	return &meOutput{Body: *user}, nil
+	return &meOutput{Body: meBody{User: *user, GoogleBooksKeyConfigured: user.GoogleBooksAPIKey != ""}}, nil
 }
 
 func (h *AuthHandler) setupStatus(_ context.Context, _ *struct{}) (*setupStatusOutput, error) {
@@ -392,7 +419,7 @@ func (h *AuthHandler) sendOTP(ctx context.Context, _ *sendOTPInput) (*struct{}, 
 	)
 	if err := h.email.SendEmail(user.Email, "Your Bookshelf verification code", html); err != nil {
 		// Log but don't fail — user can retry.
-		slog.WarnContext(ctx, "sendOTP: email delivery failed", "user_id", userID, "error", err)
+		log.Warn().Err(err).Uint("user_id", userID).Msg("sendOTP: email delivery failed")
 	}
 
 	return nil, nil
@@ -431,7 +458,7 @@ func (h *AuthHandler) verifyOTP(ctx context.Context, input *verifyOTPInput) (*me
 		return nil, huma.Error500InternalServerError("could not update user")
 	}
 
-	return &meOutput{Body: *user}, nil
+	return &meOutput{Body: meBody{User: *user, GoogleBooksKeyConfigured: user.GoogleBooksAPIKey != ""}}, nil
 }
 
 func (h *AuthHandler) changePassword(ctx context.Context, input *changePasswordInput) (*struct{}, error) {
@@ -470,7 +497,7 @@ func (h *AuthHandler) changePassword(ctx context.Context, input *changePasswordI
 		return nil, huma.Error500InternalServerError("could not update password")
 	}
 
-	slog.Info("password changed", "user_id", userID)
+	log.Info().Uint("user_id", userID).Msg("password changed")
 	return nil, nil
 }
 

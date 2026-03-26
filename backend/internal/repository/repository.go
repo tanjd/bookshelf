@@ -56,6 +56,7 @@ type CopyRepository interface {
 	GetByIDWithAssociations(id uint) (*models.Copy, error)
 	GetByIDWithOwner(id uint) (*models.Copy, error)
 	ListByOwnerID(ownerID uint) ([]models.Copy, error)
+	CountByOwnerID(ownerID uint) (int64, error)
 	Save(copy *models.Copy) error
 	Delete(copy *models.Copy) error
 	UpdateStatus(id uint, status string) error

@@ -14,9 +14,11 @@ type Config struct {
 	CORSOrigins             []string
 	ResendAPIKey            string
 	EmailFrom               string
+	DevEmailOverride        string
 	Env                     string
 	GoogleBooksAPIKey       string
 	MetadataRefreshInterval string
+	AppConfigPath           string
 }
 
 // Load reads configuration from environment variables, applying defaults where
@@ -29,9 +31,11 @@ func Load() *Config {
 		CORSOrigins:             strings.Split(getEnv("CORS_ORIGINS", "http://localhost:3000"), ","),
 		ResendAPIKey:            getEnv("RESEND_API_KEY", ""),
 		EmailFrom:               getEnv("EMAIL_FROM", "noreply@bookshelf.local"),
+		DevEmailOverride:        getEnv("DEV_EMAIL_OVERRIDE", ""),
 		Env:                     getEnv("ENV", "dev"),
 		GoogleBooksAPIKey:       getEnv("GOOGLE_BOOKS_API_KEY", ""),
 		MetadataRefreshInterval: getEnv("METADATA_REFRESH_INTERVAL", "24h"),
+		AppConfigPath:           getEnv("APP_CONFIG_PATH", "./bookshelf.yaml"),
 	}
 }
 

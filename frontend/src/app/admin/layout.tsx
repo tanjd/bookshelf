@@ -10,6 +10,7 @@ const adminLinks = [
   { href: "/admin/users", label: "Users" },
   { href: "/admin/settings", label: "Settings" },
   { href: "/admin/jobs", label: "Jobs" },
+  { href: "/admin/metadata", label: "Metadata" },
 ]
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

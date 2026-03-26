@@ -5,16 +5,18 @@ import "time"
 
 // User represents a registered member of the church community.
 type User struct {
-	ID        uint       `gorm:"primarykey" json:"id"`
-	Name      string     `gorm:"not null" json:"name"`
-	Email     string     `gorm:"uniqueIndex;not null" json:"email"`
-	Phone     string     `json:"phone"`
-	Password  string     `gorm:"not null" json:"-"`
-	Verified  bool       `gorm:"default:false" json:"verified"`
-	Role      string     `gorm:"default:'user';not null" json:"role"`
-	CreatedAt time.Time  `json:"created_at"`
-	OTPCode   string     `gorm:"column:otp_code" json:"-"`
-	OTPExpiry *time.Time `gorm:"column:otp_expiry" json:"-"`
+	ID                uint       `gorm:"primarykey" json:"id"`
+	Name              string     `gorm:"not null" json:"name"`
+	Email             string     `gorm:"uniqueIndex;not null" json:"email"`
+	Phone             string     `json:"phone"`
+	Password          string     `gorm:"not null" json:"-"`
+	Verified          bool       `gorm:"default:false" json:"verified"`
+	Suspended         bool       `gorm:"default:false" json:"suspended"`
+	Role              string     `gorm:"default:'user';not null" json:"role"`
+	CreatedAt         time.Time  `json:"created_at"`
+	OTPCode           string     `gorm:"column:otp_code" json:"-"`
+	OTPExpiry         *time.Time `gorm:"column:otp_expiry" json:"-"`
+	GoogleBooksAPIKey string     `gorm:"column:google_books_api_key" json:"-"`
 }
 
 // AppSetting is a runtime-configurable key-value pair stored in the database.
@@ -53,6 +55,7 @@ type Copy struct {
 	Status             string `gorm:"default:'available'" json:"status"`
 	AutoApprove        bool   `gorm:"default:false" json:"auto_approve"`
 	ReturnDateRequired bool   `gorm:"default:false" json:"return_date_required"`
+	HideOwner          bool   `gorm:"default:false" json:"hide_owner"`
 	Book               Book   `json:"book,omitempty"`
 	Owner              User   `json:"owner,omitempty"`
 }

@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { toast } from "sonner"
 import { api } from "@/lib/api"
 import type { AppSetting } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -17,9 +18,19 @@ const SETTING_LABELS: Record<string, { label: string; description: string; type:
     type: "number",
   },
   require_verified_to_borrow: {
-    label: "Require Verified to Borrow",
-    description: "Only verified users can request to borrow books",
+    label: "Require Verified Email to Borrow",
+    description: "Only users with a verified email can request to borrow books",
     type: "bool",
+  },
+  verification_requires_phone: {
+    label: "Require Phone Number to Borrow",
+    description: "Users must have a phone number set before they can borrow",
+    type: "bool",
+  },
+  verification_min_books_shared: {
+    label: "Min Books Shared to Borrow",
+    description: "Users must have shared at least this many books before borrowing (0 = disabled)",
+    type: "number",
   },
   max_active_loans: {
     label: "Max Active Loans Per User",
@@ -34,6 +45,7 @@ export default function AdminSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     api.adminGetSettings().then((data) => {
@@ -62,6 +74,24 @@ export default function AdminSettingsPage() {
     }
   }
 
+  async function handleExport() {
+    setExporting(true)
+    try {
+      const { content } = await api.adminExportSettings()
+      const blob = new Blob([content], { type: "application/yaml" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = "bookshelf.yaml"
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      toast.error("Failed to export settings")
+    } finally {
+      setExporting(false)
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Loading settings…</p>
 
   return (
@@ -69,12 +99,13 @@ export default function AdminSettingsPage() {
       <div className="space-y-6">
         {settings.map((setting) => {
           const meta = SETTING_LABELS[setting.key]
-          const type = meta?.type ?? "string"
+          if (!meta) return null
+          const type = meta.type
           return (
             <div key={setting.key} className="flex items-start justify-between gap-4">
               <div>
-                <p className="font-medium text-sm">{meta?.label ?? setting.key}</p>
-                {meta?.description && (
+                <p className="font-medium text-sm">{meta.label}</p>
+                {meta.description && (
                   <p className="text-xs text-muted-foreground mt-0.5">{meta.description}</p>
                 )}
               </div>
@@ -117,6 +148,9 @@ export default function AdminSettingsPage() {
       <div className="mt-8 flex items-center gap-3">
         <Button onClick={handleSave} disabled={saving}>
           {saving ? "Saving…" : "Save Settings"}
+        </Button>
+        <Button variant="outline" onClick={handleExport} disabled={exporting}>
+          {exporting ? "Exporting…" : "Export YAML"}
         </Button>
         {saved && <p className="text-sm text-green-600">Saved!</p>}
       </div>

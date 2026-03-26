@@ -7,12 +7,14 @@ import type {
   AuthResponse,
   AppSetting,
   BookMetadataResult,
+  MetadataProviderStatus,
   WaitlistStatus,
   PaginatedResult,
   JobStatus,
+  VerificationStatus,
 } from './types'
 
-export type { User, Book, Copy, LoanRequest, Notification, AuthResponse, AppSetting, BookMetadataResult, WaitlistStatus, PaginatedResult }
+export type { User, Book, Copy, LoanRequest, Notification, AuthResponse, AppSetting, BookMetadataResult, MetadataProviderStatus, WaitlistStatus, PaginatedResult, VerificationStatus }
 
 /** Returns an error message if the password does not meet complexity requirements, or null if valid. */
 export function validatePassword(password: string): string | null {
@@ -57,14 +59,17 @@ export const api = {
   login: (data: { email: string; password: string }) =>
     request<AuthResponse>('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
   me: () => request<User>('/auth/me'),
-  updateMe: (data: { name?: string; phone?: string; email?: string }) =>
+  updateMe: (data: { name?: string; phone?: string; email?: string; google_books_api_key?: string }) =>
     request<User>('/auth/me', { method: 'PATCH', body: JSON.stringify(data) }),
   changePassword: (data: { current_password: string; new_password: string; confirm_password: string }) =>
     request<void>('/auth/me/password', { method: 'POST', body: JSON.stringify(data) }),
+  testGoogleBooksKey: (key?: string) =>
+    request<{ ok: boolean; message?: string }>('/auth/me/google-books-key/test', { method: 'POST', body: JSON.stringify({ key: key ?? '' }) }),
   sendOTP: () =>
     request<void>('/auth/send-otp', { method: 'POST', body: JSON.stringify({}) }),
   verifyOTP: (code: string) =>
     request<User>('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ code }) }),
+  myVerificationStatus: () => request<VerificationStatus>('/auth/me/verification-status'),
 
   // Books
   getBooks: (params?: { q?: string; ol_key?: string; sort?: string; available_only?: boolean; page?: number; page_size?: number }) => {
@@ -93,9 +98,9 @@ export const api = {
   // Copies
   getMyCopies: () =>
     request<Copy[]>('/copies/mine'),
-  createCopy: (data: { book_id: number; condition: string; notes?: string; auto_approve?: boolean; return_date_required?: boolean }) =>
+  createCopy: (data: { book_id: number; condition: string; notes?: string; auto_approve?: boolean; return_date_required?: boolean; hide_owner?: boolean }) =>
     request<Copy>('/copies', { method: 'POST', body: JSON.stringify(data) }),
-  updateCopy: (id: number, data: { condition?: string; notes?: string; status?: string; auto_approve?: boolean; return_date_required?: boolean }) =>
+  updateCopy: (id: number, data: { condition?: string; notes?: string; status?: string; auto_approve?: boolean; return_date_required?: boolean; hide_owner?: boolean }) =>
     request<Copy>(`/copies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteCopy: (id: number) =>
     request<void>(`/copies/${id}`, { method: 'DELETE' }),
@@ -148,7 +153,7 @@ export const api = {
     const qs = new URLSearchParams(p).toString()
     return request<PaginatedResult<User>>(`/admin/users${qs ? '?' + qs : ''}`)
   },
-  adminUpdateUser: (id: number, data: { role?: 'user' | 'admin'; verified?: boolean }) =>
+  adminUpdateUser: (id: number, data: { role?: 'user' | 'admin'; suspended?: boolean }) =>
     request<User>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   adminDeleteUser: (id: number) =>
     request<void>(`/admin/users/${id}`, { method: 'DELETE' }),
@@ -156,10 +161,16 @@ export const api = {
     request<AppSetting[]>('/admin/settings'),
   adminUpdateSettings: (settings: { key: string; value: string }[]) =>
     request<AppSetting[]>('/admin/settings', { method: 'PATCH', body: JSON.stringify(settings) }),
+  adminExportSettings: () =>
+    request<{ content: string }>('/admin/settings/export'),
 
   // Jobs
   adminGetJobs: () =>
     request<JobStatus[]>('/admin/jobs'),
   adminRunJob: (job: string) =>
     request<void>(`/admin/jobs/${job}/run`, { method: 'POST' }),
+
+  // Metadata provider status
+  adminGetMetadataStatus: () =>
+    request<MetadataProviderStatus[]>('/admin/metadata/status'),
 }

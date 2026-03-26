@@ -3,22 +3,32 @@ package handlers
 import (
 	"context"
 	"errors"
+	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/rs/zerolog/log"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
 	"github.com/tanjd/bookshelf/internal/models"
 	"github.com/tanjd/bookshelf/internal/repository"
 )
 
+type exportSettingsOutput struct {
+	Body struct {
+		Content string `json:"content"`
+	}
+}
+
 // AdminHandler holds dependencies for admin routes.
 type AdminHandler struct {
-	admin repository.AdminRepository
+	admin             repository.AdminRepository
+	googleBooksAPIKey string
 }
 
 // NewAdminHandler creates a new AdminHandler.
-func NewAdminHandler(admin repository.AdminRepository) *AdminHandler {
-	return &AdminHandler{admin: admin}
+func NewAdminHandler(admin repository.AdminRepository, googleBooksAPIKey string) *AdminHandler {
+	return &AdminHandler{admin: admin, googleBooksAPIKey: googleBooksAPIKey}
 }
 
 // --- Input / Output types ---
@@ -45,8 +55,8 @@ type adminUserIDInput struct {
 type updateAdminUserInput struct {
 	ID   uint `path:"id" doc:"User ID"`
 	Body struct {
-		Role     *string `json:"role,omitempty" doc:"Role: user or admin"`
-		Verified *bool   `json:"verified,omitempty" doc:"Whether the user is verified"`
+		Role      *string `json:"role,omitempty" doc:"Role: user or admin"`
+		Suspended *bool   `json:"suspended,omitempty" doc:"Whether the user is suspended (cannot log in)"`
 	}
 }
 
@@ -63,6 +73,19 @@ type updateSettingsInput struct {
 		Key   string `json:"key" required:"true" doc:"Setting key"`
 		Value string `json:"value" required:"true" doc:"Setting value"`
 	}
+}
+
+// MetadataProviderStatus reports reachability of a single metadata source.
+type MetadataProviderStatus struct {
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	Reachable bool   `json:"reachable"`
+	LatencyMs int64  `json:"latency_ms"`
+	Error     string `json:"error,omitempty"`
+}
+
+type metadataStatusOutput struct {
+	Body []MetadataProviderStatus
 }
 
 // --- Route registration ---
@@ -85,7 +108,7 @@ func (h *AdminHandler) RegisterRoutes(api huma.API) {
 		Method:      "PATCH",
 		Path:        "/admin/users/{id}",
 		Tags:        []string{"admin"},
-		Summary:     "Update a user's role or verified status",
+		Summary:     "Update a user's role or suspended status",
 		Security:    security,
 	}, h.updateUser)
 
@@ -116,6 +139,24 @@ func (h *AdminHandler) RegisterRoutes(api huma.API) {
 		Summary:     "Upsert app settings",
 		Security:    security,
 	}, h.updateSettings)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "admin-export-settings",
+		Method:      "GET",
+		Path:        "/admin/settings/export",
+		Tags:        []string{"admin"},
+		Summary:     "Export current settings as a bookshelf.yaml file",
+		Security:    security,
+	}, h.exportSettings)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "admin-metadata-status",
+		Method:      "GET",
+		Path:        "/admin/metadata/status",
+		Tags:        []string{"admin"},
+		Summary:     "Check reachability of metadata providers",
+		Security:    security,
+	}, h.getMetadataStatus)
 }
 
 // --- Handlers ---
@@ -180,8 +221,11 @@ func (h *AdminHandler) updateUser(ctx context.Context, input *updateAdminUserInp
 		}
 		user.Role = *input.Body.Role
 	}
-	if input.Body.Verified != nil {
-		user.Verified = *input.Body.Verified
+	if input.Body.Suspended != nil {
+		if user.ID == callerID && *input.Body.Suspended {
+			return nil, huma.Error400BadRequest("cannot suspend yourself")
+		}
+		user.Suspended = *input.Body.Suspended
 	}
 
 	if err := h.admin.SaveUser(user); err != nil {
@@ -256,6 +300,84 @@ func (h *AdminHandler) updateSettings(ctx context.Context, input *updateSettings
 	}
 
 	return &adminSettingsOutput{Body: settings}, nil
+}
+
+func (h *AdminHandler) exportSettings(ctx context.Context, _ *struct{}) (*exportSettingsOutput, error) {
+	if err := middleware.RequireAdmin(ctx); err != nil {
+		return nil, adminError(err)
+	}
+
+	settings, err := h.admin.GetSettings()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not fetch settings")
+	}
+
+	data, err := settingsToYAML(settings)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not serialise settings")
+	}
+
+	var out exportSettingsOutput
+	out.Body.Content = string(data)
+	return &out, nil
+}
+
+func (h *AdminHandler) getMetadataStatus(ctx context.Context, _ *struct{}) (*metadataStatusOutput, error) {
+	if err := middleware.RequireAdmin(ctx); err != nil {
+		return nil, adminError(err)
+	}
+
+	type probe struct {
+		name    string
+		enabled bool
+		url     string
+	}
+
+	probes := []probe{
+		{
+			name:    "openlibrary",
+			enabled: true,
+			url:     "https://openlibrary.org/search.json?q=test&limit=1",
+		},
+		{
+			name:    "google_books",
+			enabled: h.googleBooksAPIKey != "",
+			url:     "https://www.googleapis.com/books/v1/volumes?q=test&maxResults=1&key=" + h.googleBooksAPIKey,
+		},
+		{
+			name:    "bookbrainz",
+			enabled: true,
+			url:     "https://api.bookbrainz.org/1/search?q=test&type=edition&size=1",
+		},
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	statuses := make([]MetadataProviderStatus, 0, len(probes))
+
+	for _, p := range probes {
+		s := MetadataProviderStatus{Name: p.name, Enabled: p.enabled}
+		if !p.enabled {
+			statuses = append(statuses, s)
+			continue
+		}
+		start := time.Now()
+		resp, err := client.Get(p.url) //nolint:noctx,gosec
+		s.LatencyMs = time.Since(start).Milliseconds()
+		if err != nil {
+			s.Error = err.Error()
+			log.Warn().Err(err).Str("provider", p.name).Msg("metadata probe failed")
+		} else {
+			_ = resp.Body.Close()
+			if resp.StatusCode < 400 {
+				s.Reachable = true
+			} else {
+				s.Error = "HTTP " + http.StatusText(resp.StatusCode)
+			}
+		}
+		statuses = append(statuses, s)
+	}
+
+	return &metadataStatusOutput{Body: statuses}, nil
 }
 
 // adminError maps middleware sentinel errors to appropriate huma errors.
