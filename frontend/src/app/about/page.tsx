@@ -46,7 +46,7 @@ const faqs = [
           .
         </li>
         <li>
-          Search for <strong>"Books API"</strong> and click{" "}
+          Search for <strong>&ldquo;Books API&rdquo;</strong> and click{" "}
           <strong>Enable</strong>.
         </li>
         <li>

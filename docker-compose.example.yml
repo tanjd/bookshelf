@@ -14,10 +14,11 @@ services:
       - ENV=prd
       - PORT=8000
       - DB_PATH=/app/data/bookshelf.db
-      - JWT_SECRET=changeme-use-a-long-random-string
-      - CORS_ORIGINS=http://localhost:3000
-      - RESEND_API_KEY=
-      - EMAIL_FROM=noreply@yourdomain.com
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGINS=https://${DOMAIN}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - EMAIL_FROM=${EMAIL_FROM:-noreply@yourdomain.com}
+      - GOOGLE_BOOKS_API_KEY=${GOOGLE_BOOKS_API_KEY:-}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
       interval: 30s
@@ -34,10 +35,10 @@ services:
     image: tanjd/bookshelf-frontend:latest
     container_name: bookshelf-frontend
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    # No ports exposed — Cloudflare Tunnel connects to this container on the
+    # internal Docker network, so no inbound ports need to be open on the host.
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - BACKEND_URL=http://bookshelf-backend:8000
     depends_on:
       backend:
         condition: service_healthy
@@ -53,6 +54,24 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: bookshelf-cloudflared
+    restart: unless-stopped
+    # Tunnel config (ingress rules) lives in the Cloudflare dashboard.
+    # Set the public hostname there to route to http://bookshelf-frontend:3000.
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      frontend:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:
