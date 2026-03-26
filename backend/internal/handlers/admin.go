@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -330,7 +331,9 @@ func (h *AdminHandler) getMetadataStatus(ctx context.Context, _ *struct{}) (*met
 	type probe struct {
 		name    string
 		enabled bool
-		url     string
+		// url is the actual request URL; it may contain secrets and must never be
+		// surfaced in responses or logs.
+		url string
 	}
 
 	probes := []probe{
@@ -352,30 +355,36 @@ func (h *AdminHandler) getMetadataStatus(ctx context.Context, _ *struct{}) (*met
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	statuses := make([]MetadataProviderStatus, 0, len(probes))
+	statuses := make([]MetadataProviderStatus, len(probes))
 
-	for _, p := range probes {
-		s := MetadataProviderStatus{Name: p.name, Enabled: p.enabled}
+	var wg sync.WaitGroup
+	for i, p := range probes {
+		statuses[i] = MetadataProviderStatus{Name: p.name, Enabled: p.enabled}
 		if !p.enabled {
-			statuses = append(statuses, s)
 			continue
 		}
-		start := time.Now()
-		resp, err := client.Get(p.url) //nolint:noctx,gosec
-		s.LatencyMs = time.Since(start).Milliseconds()
-		if err != nil {
-			s.Error = err.Error()
-			log.Warn().Err(err).Str("provider", p.name).Msg("metadata probe failed")
-		} else {
-			_ = resp.Body.Close()
-			if resp.StatusCode < 400 {
-				s.Reachable = true
+		wg.Add(1)
+		go func(idx int, p probe) {
+			defer wg.Done()
+			s := &statuses[idx]
+			start := time.Now()
+			resp, err := client.Get(p.url) //nolint:noctx,gosec
+			s.LatencyMs = time.Since(start).Milliseconds()
+			if err != nil {
+				// Do not include the URL in the error — it may contain an API key.
+				s.Error = "connection error"
+				log.Warn().Err(err).Str("provider", p.name).Msg("metadata probe failed")
 			} else {
-				s.Error = "HTTP " + http.StatusText(resp.StatusCode)
+				_ = resp.Body.Close()
+				if resp.StatusCode < 400 {
+					s.Reachable = true
+				} else {
+					s.Error = "HTTP " + http.StatusText(resp.StatusCode)
+				}
 			}
-		}
-		statuses = append(statuses, s)
+		}(i, p)
 	}
+	wg.Wait()
 
 	return &metadataStatusOutput{Body: statuses}, nil
 }

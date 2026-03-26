@@ -3,6 +3,7 @@ package handlers
 import (
 	"os"
 
+	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
 
 	"github.com/tanjd/bookshelf/internal/models"
@@ -19,8 +20,18 @@ type appConfigFile struct {
 	CoverRefreshInterval       string `yaml:"cover_refresh_interval,omitempty"`
 }
 
+var knownYAMLKeys = map[string]struct{}{
+	"allow_registration":            {},
+	"max_copies_per_user":           {},
+	"max_active_loans":              {},
+	"require_verified_to_borrow":    {},
+	"verification_requires_phone":   {},
+	"verification_min_books_shared": {},
+	"cover_refresh_interval":        {},
+}
+
 // LoadYAMLConfig parses a bookshelf.yaml file and returns a flat key→value map
-// of recognized settings. Unknown keys are silently ignored.
+// of recognized settings. Unknown keys are logged as warnings and ignored.
 // Returns nil map (not an error) when the file does not exist.
 func LoadYAMLConfig(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec
@@ -29,6 +40,16 @@ func LoadYAMLConfig(path string) (map[string]string, error) {
 			return nil, nil
 		}
 		return nil, err
+	}
+
+	// Detect unknown keys before struct unmarshalling silently discards them.
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err == nil {
+		for k := range raw {
+			if _, ok := knownYAMLKeys[k]; !ok {
+				log.Warn().Str("key", k).Str("path", path).Msg("bookshelf.yaml: unknown setting key ignored")
+			}
+		}
 	}
 
 	var cfg appConfigFile

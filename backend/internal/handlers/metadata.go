@@ -43,18 +43,18 @@ const searchCacheTTL = 1 * time.Hour
 // MetadataHandler handles book metadata search routes.
 type MetadataHandler struct {
 	googleBooksAPIKey string
-	jwtSecret         string
+	encryptionSecret  string
 	users             repository.UserRepository
 	cache             MetadataCache
 }
 
 // NewMetadataHandler creates a MetadataHandler.
-func NewMetadataHandler(googleBooksAPIKey, jwtSecret string, users repository.UserRepository) *MetadataHandler {
+func NewMetadataHandler(googleBooksAPIKey, encryptionSecret string, users repository.UserRepository, ctx context.Context) *MetadataHandler {
 	return &MetadataHandler{
 		googleBooksAPIKey: googleBooksAPIKey,
-		jwtSecret:         jwtSecret,
+		encryptionSecret:  encryptionSecret,
 		users:             users,
-		cache:             NewInMemoryMetadataCache(searchCacheTTL),
+		cache:             NewInMemoryMetadataCache(searchCacheTTL, ctx),
 	}
 }
 
@@ -103,22 +103,27 @@ func (h *MetadataHandler) searchMetadata(ctx context.Context, input *searchMetad
 		return &searchMetadataOutput{Body: []BookMetadataResult{}}, nil
 	}
 
-	cacheKey := strings.ToLower(q)
-	if cached, ok := h.cache.Get(cacheKey); ok {
-		log.Info().Str("query", q).Msg("metadata search cache hit")
-		return &searchMetadataOutput{Body: cached}, nil
-	}
-
 	// Resolve the Google Books API key: prefer the authenticated user's key.
 	apiKey := h.googleBooksAPIKey
 	if userID, err := middleware.GetRequiredUserID(ctx); err == nil {
 		if user, err := h.users.FindByID(userID); err == nil && user.GoogleBooksAPIKey != "" {
-			if decrypted, err := decryptField(user.GoogleBooksAPIKey, h.jwtSecret); err == nil {
+			if decrypted, err := decryptField(user.GoogleBooksAPIKey, h.encryptionSecret); err == nil {
 				apiKey = decrypted
 			} else {
 				log.Warn().Err(err).Uint("user_id", userID).Msg("could not decrypt user google books api key")
 			}
 		}
+	}
+
+	// Cache key incorporates whether Google Books is active so that users with
+	// and without a Google Books key do not share cache entries.
+	cacheKey := strings.ToLower(q)
+	if apiKey != "" {
+		cacheKey += "|gbooks"
+	}
+	if cached, ok := h.cache.Get(cacheKey); ok {
+		log.Info().Str("query", q).Msg("metadata search cache hit")
+		return &searchMetadataOutput{Body: cached}, nil
 	}
 
 	var mu sync.Mutex
@@ -381,7 +386,7 @@ func fetchGoogleBooks(q, apiKey string) ([]BookMetadataResult, error) {
 // fetchBookBrainz calls the BookBrainz search API and returns normalised results.
 // BookBrainz does not provide cover images.
 func fetchBookBrainz(q string) ([]BookMetadataResult, error) {
-	log.Info().Str("query", q).Msg("searching BookBrainz")
+	log.Debug().Str("query", q).Msg("searching BookBrainz")
 	apiURL := fmt.Sprintf(
 		"https://api.bookbrainz.org/1/search?q=%s&type=edition&size=10",
 		url.QueryEscape(q),
@@ -418,7 +423,7 @@ func fetchBookBrainz(q string) ([]BookMetadataResult, error) {
 		return nil, err
 	}
 
-	log.Info().Str("query", q).Int("results", len(payload.Results)).Msg("BookBrainz search complete")
+	log.Debug().Str("query", q).Int("results", len(payload.Results)).Msg("BookBrainz search complete")
 	results := make([]BookMetadataResult, 0, len(payload.Results))
 	for _, item := range payload.Results {
 		if item.DefaultAlias.Name == "" {

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -24,13 +25,14 @@ type inMemoryMetadataCache struct {
 }
 
 // NewInMemoryMetadataCache returns a MetadataCache backed by an in-memory map.
-// A background goroutine evicts expired entries every 10 minutes.
-func NewInMemoryMetadataCache(ttl time.Duration) MetadataCache {
+// A background goroutine evicts expired entries every 10 minutes; it stops when
+// ctx is cancelled.
+func NewInMemoryMetadataCache(ttl time.Duration, ctx context.Context) MetadataCache {
 	c := &inMemoryMetadataCache{
 		entries: make(map[string]cacheEntry),
 		ttl:     ttl,
 	}
-	go c.runEviction()
+	go c.runEviction(ctx)
 	return c
 }
 
@@ -64,10 +66,15 @@ func (c *inMemoryMetadataCache) evictExpired() {
 	c.mu.Unlock()
 }
 
-func (c *inMemoryMetadataCache) runEviction() {
+func (c *inMemoryMetadataCache) runEviction(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		c.evictExpired()
+	for {
+		select {
+		case <-ticker.C:
+			c.evictExpired()
+		case <-ctx.Done():
+			return
+		}
 	}
 }

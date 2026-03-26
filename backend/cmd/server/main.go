@@ -51,8 +51,10 @@ func main() {
 		Str("email_from", cfg.EmailFrom).
 		Bool("google_books_enabled", cfg.GoogleBooksAPIKey != "").
 		Str("metadata_refresh_interval", cfg.MetadataRefreshInterval).
-		Bool("jwt_secret_is_default", cfg.JWTSecret == "dev-secret-change-me").
 		Msg("bookshelf starting")
+	if cfg.JWTSecret == "dev-secret-change-me" {
+		log.Warn().Msg("JWT_SECRET is set to the default value — change it before deploying to production")
+	}
 
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
@@ -92,9 +94,20 @@ func main() {
 		log.Info().Str("path", cfg.AppConfigPath).Int("keys", len(kvs)).Msg("seeded settings from YAML")
 	}
 
+	// Create the root context early so it can be passed to handlers that run
+	// background goroutines (e.g. the metadata cache eviction loop).
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Resolve encryption secret: use ENCRYPTION_SECRET if set, otherwise fall
+	// back to JWT_SECRET so existing deployments keep working unchanged.
+	encryptionSecret := cfg.EncryptionSecret
+	if encryptionSecret == "" {
+		encryptionSecret = cfg.JWTSecret
+	}
+
 	// Handlers
-	authH := handlers.NewAuthHandler(userRepo, adminRepo, copyRepo, cfg.JWTSecret, emailSvc)
-	metadataH := handlers.NewMetadataHandler(cfg.GoogleBooksAPIKey, cfg.JWTSecret, userRepo)
+	authH := handlers.NewAuthHandler(userRepo, adminRepo, copyRepo, cfg.JWTSecret, encryptionSecret, emailSvc)
+	metadataH := handlers.NewMetadataHandler(cfg.GoogleBooksAPIKey, encryptionSecret, userRepo, ctx)
 	bookH := handlers.NewBookHandler(bookRepo, userRepo, coversDir)
 	copyH := handlers.NewCopyHandler(copyRepo, userRepo, notifRepo, waitlistRepo, adminRepo)
 	loanH := handlers.NewLoanRequestHandler(copyRepo, loanRepo, adminRepo, userRepo, workflow)
@@ -160,7 +173,6 @@ func main() {
 	}
 
 	// Start the background scheduler.
-	ctx, cancel := context.WithCancel(context.Background())
 	go scheduler.Start(ctx)
 
 	// Graceful shutdown on SIGINT/SIGTERM.

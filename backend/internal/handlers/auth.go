@@ -54,16 +54,17 @@ func validatePasswordComplexity(p string) string {
 
 // AuthHandler holds dependencies for authentication routes.
 type AuthHandler struct {
-	users     repository.UserRepository
-	admin     repository.AdminRepository
-	copies    repository.CopyRepository
-	jwtSecret string
-	email     *services.EmailService
+	users            repository.UserRepository
+	admin            repository.AdminRepository
+	copies           repository.CopyRepository
+	jwtSecret        string
+	encryptionSecret string
+	email            *services.EmailService
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(users repository.UserRepository, admin repository.AdminRepository, copies repository.CopyRepository, jwtSecret string, email *services.EmailService) *AuthHandler {
-	return &AuthHandler{users: users, admin: admin, copies: copies, jwtSecret: jwtSecret, email: email}
+func NewAuthHandler(users repository.UserRepository, admin repository.AdminRepository, copies repository.CopyRepository, jwtSecret, encryptionSecret string, email *services.EmailService) *AuthHandler {
+	return &AuthHandler{users: users, admin: admin, copies: copies, jwtSecret: jwtSecret, encryptionSecret: encryptionSecret, email: email}
 }
 
 // --- Input / Output types ---
@@ -359,6 +360,10 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 		return nil, huma.Error500InternalServerError("could not fetch user")
 	}
 
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
+	}
+
 	if input.Body.Name != nil {
 		user.Name = *input.Body.Name
 	}
@@ -381,10 +386,7 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 		if *input.Body.GoogleBooksAPIKey == "" {
 			user.GoogleBooksAPIKey = ""
 		} else {
-			if err := validateGoogleBooksAPIKey(*input.Body.GoogleBooksAPIKey); err != nil {
-				return nil, huma.Error422UnprocessableEntity("invalid Google Books API key")
-			}
-			encrypted, err := encryptField(*input.Body.GoogleBooksAPIKey, h.jwtSecret)
+			encrypted, err := encryptField(*input.Body.GoogleBooksAPIKey, h.encryptionSecret)
 			if err != nil {
 				return nil, huma.Error500InternalServerError("could not save API key")
 			}
@@ -417,7 +419,7 @@ func (h *AuthHandler) testGoogleBooksKey(ctx context.Context, input *testGoogleB
 		if user.GoogleBooksAPIKey == "" {
 			return nil, huma.Error400BadRequest("no Google Books API key configured")
 		}
-		decrypted, err := decryptField(user.GoogleBooksAPIKey, h.jwtSecret)
+		decrypted, err := decryptField(user.GoogleBooksAPIKey, h.encryptionSecret)
 		if err != nil {
 			return nil, huma.Error500InternalServerError("could not read stored key")
 		}
@@ -491,6 +493,10 @@ func (h *AuthHandler) sendOTP(ctx context.Context, _ *sendOTPInput) (*struct{}, 
 		return nil, huma.Error500InternalServerError("could not fetch user")
 	}
 
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
+	}
+
 	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not generate OTP")
@@ -525,6 +531,10 @@ func (h *AuthHandler) verifyOTP(ctx context.Context, input *verifyOTPInput) (*me
 	user, err := h.users.FindByID(userID)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
 	}
 
 	if user.OTPCode == "" || user.OTPExpiry == nil {
@@ -564,6 +574,10 @@ func (h *AuthHandler) changePassword(ctx context.Context, input *changePasswordI
 			return nil, huma.Error404NotFound("user not found")
 		}
 		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Body.CurrentPassword)); err != nil {

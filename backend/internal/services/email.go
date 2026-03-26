@@ -37,7 +37,7 @@ type resendPayload struct {
 func (s *EmailService) SendEmail(recipient, subject, html string) error {
 	to := recipient
 	if s.env == "dev" && s.devEmailOverride != "" {
-		log.Debug().Str("original", recipient).Str("override", to).Msg("email: dev override active")
+		log.Debug().Str("original", recipient).Str("override", s.devEmailOverride).Msg("email: dev override active")
 		to = s.devEmailOverride
 	}
 	if s.apiKey == "" {

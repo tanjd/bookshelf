@@ -316,8 +316,18 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 		return nil, huma.Error400BadRequest("copy is not available")
 	}
 
+	// Load all settings in a single query for the eligibility checks below.
+	allSettings, err := h.admin.GetSettings()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not load settings")
+	}
+	sm := make(map[string]string, len(allSettings))
+	for _, s := range allSettings {
+		sm[s.Key] = s.Value
+	}
+
 	// Enforce max active loans setting (0 = unlimited).
-	if maxStr, err := h.admin.GetSetting("max_active_loans"); err == nil && maxStr != "" && maxStr != "0" {
+	if maxStr := sm["max_active_loans"]; maxStr != "" && maxStr != "0" {
 		var maxLoans int64
 		if _, scanErr := fmt.Sscanf(maxStr, "%d", &maxLoans); scanErr == nil && maxLoans > 0 {
 			activeCount, countErr := h.loanReqs.CountActiveLoansByBorrower(borrowerID)
@@ -333,21 +343,21 @@ func (h *LoanRequestHandler) createLoanRequest(ctx context.Context, input *creat
 	borrower, borrowerErr := h.users.FindByID(borrowerID)
 
 	// Enforce require_verified_to_borrow.
-	if val, _ := h.admin.GetSetting("require_verified_to_borrow"); val == "true" {
+	if sm["require_verified_to_borrow"] == "true" {
 		if borrowerErr != nil || !borrower.Verified {
 			return nil, huma.Error403Forbidden("a verified email is required to borrow books")
 		}
 	}
 
 	// Enforce verification_requires_phone.
-	if val, _ := h.admin.GetSetting("verification_requires_phone"); val == "true" {
+	if sm["verification_requires_phone"] == "true" {
 		if borrowerErr != nil || borrower.Phone == "" {
 			return nil, huma.Error403Forbidden("a phone number is required to borrow books")
 		}
 	}
 
 	// Enforce verification_min_books_shared (0 = disabled).
-	if minStr, _ := h.admin.GetSetting("verification_min_books_shared"); minStr != "" && minStr != "0" {
+	if minStr := sm["verification_min_books_shared"]; minStr != "" && minStr != "0" {
 		var minBooks int64
 		if _, scanErr := fmt.Sscanf(minStr, "%d", &minBooks); scanErr == nil && minBooks > 0 {
 			sharedCount, countErr := h.copies.CountByOwnerID(borrowerID)
