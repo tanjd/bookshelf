@@ -20,8 +20,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <main className="max-w-6xl mx-auto px-4 py-6">
           <SetupGuard>{children}</SetupGuard>
         </main>
-        <footer className="text-xs text-muted-foreground text-center py-4">
-          v{process.env.NEXT_PUBLIC_VERSION}
+        <footer className="text-sm text-muted-foreground text-center py-6 flex items-center justify-center gap-3">
+          <span>v{process.env.NEXT_PUBLIC_VERSION}</span>
+          <span>·</span>
+          <a href="/about" className="hover:underline underline-offset-2">About</a>
         </footer>
         <Toaster richColors position="bottom-right" />
       </body>

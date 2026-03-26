@@ -1,0 +1,13 @@
+# Secrets and env
+.env
+.env.*
+!.env.example
+*.pem
+
+# Data — mounted as a volume at runtime
+data/
+*.db
+
+# Dev tooling
+.golangci.yaml
+bin/

@@ -5,13 +5,14 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/tanjd/bookshelf/internal/repository"
 )
@@ -98,7 +99,7 @@ func (s *Scheduler) TriggerNow() {
 // It uses a 1-minute base tick and checks the configured interval on each tick,
 // so interval changes take effect within a minute.
 func (s *Scheduler) Start(ctx context.Context) {
-	slog.Info("scheduler started", "interval", s.interval())
+	log.Info().Dur("interval", s.interval()).Msg("scheduler started")
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
@@ -125,7 +126,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 		case <-s.trigger:
 			s.refreshCovers(ctx)
 		case <-ctx.Done():
-			slog.Info("scheduler stopped")
+			log.Info().Msg("scheduler stopped")
 			return
 		}
 	}
@@ -141,7 +142,7 @@ func (s *Scheduler) refreshCovers(ctx context.Context) {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
-		slog.Info("scheduler: cover refresh already running, skipping")
+		log.Info().Msg("scheduler: cover refresh already running, skipping")
 		return
 	}
 	s.running = true
@@ -156,11 +157,11 @@ func (s *Scheduler) refreshCovers(ctx context.Context) {
 		s.mu.Unlock()
 	}()
 
-	slog.Info("scheduler: starting cover refresh")
+	log.Info().Msg("scheduler: starting cover refresh")
 
 	books, err := s.books.List("", "title", false)
 	if err != nil {
-		slog.Error("scheduler: failed to list books", "error", err)
+		log.Error().Err(err).Msg("scheduler: failed to list books")
 		s.mu.Lock()
 		s.lastResult = "failed: " + err.Error()
 		s.mu.Unlock()
@@ -182,7 +183,7 @@ func (s *Scheduler) refreshCovers(ctx context.Context) {
 
 		localPath, dlErr := s.downloadCover(book.CoverURL)
 		if dlErr != nil {
-			slog.Warn("scheduler: cover download failed", "book_id", book.ID, "error", dlErr)
+			log.Warn().Err(dlErr).Uint("book_id", book.ID).Msg("scheduler: cover download failed")
 			continue
 		}
 		if localPath == "" || localPath == book.CoverURL {
@@ -191,14 +192,14 @@ func (s *Scheduler) refreshCovers(ctx context.Context) {
 
 		book.CoverURL = localPath
 		if saveErr := s.books.Save(&book); saveErr != nil {
-			slog.Warn("scheduler: failed to save cover path", "book_id", book.ID, "error", saveErr)
+			log.Warn().Err(saveErr).Uint("book_id", book.ID).Msg("scheduler: failed to save cover path")
 			continue
 		}
 		refreshed++
 	}
 
 	result := fmt.Sprintf("refreshed %d of %d books", refreshed, len(books))
-	slog.Info("scheduler: cover refresh complete", "refreshed", refreshed, "total", len(books))
+	log.Info().Int("refreshed", refreshed).Int("total", len(books)).Msg("scheduler: cover refresh complete")
 	s.mu.Lock()
 	s.lastResult = result
 	s.mu.Unlock()
@@ -252,6 +253,6 @@ func (s *Scheduler) downloadCover(externalURL string) (string, error) {
 		return "", err
 	}
 
-	slog.Info("scheduler: cover cached", "filename", filename)
+	log.Debug().Str("filename", filename).Msg("scheduler: cover cached")
 	return "/api/covers/" + filename, nil
 }

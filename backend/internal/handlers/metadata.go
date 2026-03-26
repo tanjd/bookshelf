@@ -5,14 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/rs/zerolog/log"
+
+	"github.com/tanjd/bookshelf/internal/middleware"
+	"github.com/tanjd/bookshelf/internal/repository"
 )
+
+// metadataClient is a shared HTTP client with a timeout for all metadata fetches.
+var metadataClient = &http.Client{Timeout: 10 * time.Second}
 
 // BookMetadataResult is a normalised search result from any metadata source.
 type BookMetadataResult struct {
@@ -28,16 +35,27 @@ type BookMetadataResult struct {
 	Language      string `json:"language"`
 	OLKey         string `json:"ol_key"`
 	GoogleBooksID string `json:"google_books_id"`
+	BookBrainzID  string `json:"bookbrainz_id,omitempty"`
 }
+
+const searchCacheTTL = 1 * time.Hour
 
 // MetadataHandler handles book metadata search routes.
 type MetadataHandler struct {
 	googleBooksAPIKey string
+	encryptionSecret  string
+	users             repository.UserRepository
+	cache             MetadataCache
 }
 
 // NewMetadataHandler creates a MetadataHandler.
-func NewMetadataHandler(googleBooksAPIKey string) *MetadataHandler {
-	return &MetadataHandler{googleBooksAPIKey: googleBooksAPIKey}
+func NewMetadataHandler(googleBooksAPIKey, encryptionSecret string, users repository.UserRepository, ctx context.Context) *MetadataHandler {
+	return &MetadataHandler{
+		googleBooksAPIKey: googleBooksAPIKey,
+		encryptionSecret:  encryptionSecret,
+		users:             users,
+		cache:             NewInMemoryMetadataCache(searchCacheTTL, ctx),
+	}
 }
 
 // RegisterRoutes registers the metadata routes on the given huma API.
@@ -79,10 +97,33 @@ type olDescriptionOutput struct {
 	}
 }
 
-func (h *MetadataHandler) searchMetadata(_ context.Context, input *searchMetadataInput) (*searchMetadataOutput, error) {
+func (h *MetadataHandler) searchMetadata(ctx context.Context, input *searchMetadataInput) (*searchMetadataOutput, error) {
 	q := strings.TrimSpace(input.Q)
 	if q == "" {
 		return &searchMetadataOutput{Body: []BookMetadataResult{}}, nil
+	}
+
+	// Resolve the Google Books API key: prefer the authenticated user's key.
+	apiKey := h.googleBooksAPIKey
+	if userID, err := middleware.GetRequiredUserID(ctx); err == nil {
+		if user, err := h.users.FindByID(userID); err == nil && user.GoogleBooksAPIKey != "" {
+			if decrypted, err := decryptField(user.GoogleBooksAPIKey, h.encryptionSecret); err == nil {
+				apiKey = decrypted
+			} else {
+				log.Warn().Err(err).Uint("user_id", userID).Msg("could not decrypt user google books api key")
+			}
+		}
+	}
+
+	// Cache key incorporates whether Google Books is active so that users with
+	// and without a Google Books key do not share cache entries.
+	cacheKey := strings.ToLower(q)
+	if apiKey != "" {
+		cacheKey += "|gbooks"
+	}
+	if cached, ok := h.cache.Get(cacheKey); ok {
+		log.Info().Str("query", q).Msg("metadata search cache hit")
+		return &searchMetadataOutput{Body: cached}, nil
 	}
 
 	var mu sync.Mutex
@@ -95,7 +136,7 @@ func (h *MetadataHandler) searchMetadata(_ context.Context, input *searchMetadat
 		defer wg.Done()
 		items, err := fetchOpenLibrary(q)
 		if err != nil {
-			slog.Warn("open library search failed", "err", err)
+			log.Warn().Err(err).Msg("open library search failed")
 			return
 		}
 		mu.Lock()
@@ -103,13 +144,13 @@ func (h *MetadataHandler) searchMetadata(_ context.Context, input *searchMetadat
 		mu.Unlock()
 	}()
 
-	if h.googleBooksAPIKey != "" {
+	if apiKey != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			items, err := fetchGoogleBooks(q, h.googleBooksAPIKey)
+			items, err := fetchGoogleBooks(q, apiKey)
 			if err != nil {
-				slog.Warn("google books search failed", "err", err)
+				log.Warn().Err(err).Msg("google books search failed")
 				return
 			}
 			mu.Lock()
@@ -118,19 +159,31 @@ func (h *MetadataHandler) searchMetadata(_ context.Context, input *searchMetadat
 		}()
 	}
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		items, err := fetchBookBrainz(q)
+		if err != nil {
+			log.Warn().Err(err).Msg("bookbrainz search failed")
+			return
+		}
+		mu.Lock()
+		results = append(results, items...)
+		mu.Unlock()
+	}()
+
 	wg.Wait()
 
-	if results == nil {
-		results = []BookMetadataResult{}
-	}
-	return &searchMetadataOutput{Body: results}, nil
+	consolidated := consolidateResults(results)
+	h.cache.Set(cacheKey, consolidated)
+	return &searchMetadataOutput{Body: consolidated}, nil
 }
 
 func (h *MetadataHandler) getOLDescription(_ context.Context, input *olDescriptionInput) (*olDescriptionOutput, error) {
 	workKey := strings.TrimPrefix(input.OLKey, "/works/")
 	apiURL := fmt.Sprintf("https://openlibrary.org/works/%s.json", url.PathEscape(workKey))
 
-	resp, err := http.Get(apiURL) //nolint:noctx,gosec
+	resp, err := metadataClient.Get(apiURL) //nolint:noctx,gosec
 	if err != nil {
 		return nil, huma.Error502BadGateway("could not reach Open Library")
 	}
@@ -170,11 +223,12 @@ func (h *MetadataHandler) getOLDescription(_ context.Context, input *olDescripti
 
 // fetchOpenLibrary calls the OL search API and returns normalised results.
 func fetchOpenLibrary(q string) ([]BookMetadataResult, error) {
+	log.Info().Str("query", q).Msg("searching Open Library")
 	apiURL := fmt.Sprintf(
 		"https://openlibrary.org/search.json?q=%s&fields=key,title,author_name,isbn,cover_i&limit=10",
 		url.QueryEscape(q),
 	)
-	resp, err := http.Get(apiURL) //nolint:noctx,gosec
+	resp, err := metadataClient.Get(apiURL) //nolint:noctx,gosec
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +256,7 @@ func fetchOpenLibrary(q string) ([]BookMetadataResult, error) {
 		return nil, err
 	}
 
+	log.Info().Str("query", q).Int("results", len(payload.Docs)).Msg("Open Library search complete")
 	results := make([]BookMetadataResult, 0, len(payload.Docs))
 	for _, doc := range payload.Docs {
 		r := BookMetadataResult{
@@ -223,14 +278,32 @@ func fetchOpenLibrary(q string) ([]BookMetadataResult, error) {
 	return results, nil
 }
 
+// validateGoogleBooksAPIKey makes a minimal test call to verify the key is accepted by Google Books.
+func validateGoogleBooksAPIKey(key string) error {
+	apiURL := fmt.Sprintf(
+		"https://www.googleapis.com/books/v1/volumes?q=test&key=%s&maxResults=1",
+		url.QueryEscape(key),
+	)
+	resp, err := metadataClient.Get(apiURL) //nolint:noctx,gosec
+	if err != nil {
+		return fmt.Errorf("could not reach Google Books API: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("google Books API rejected the key (status %d)", resp.StatusCode)
+	}
+	return nil
+}
+
 // fetchGoogleBooks calls the Google Books API and returns normalised results.
 func fetchGoogleBooks(q, apiKey string) ([]BookMetadataResult, error) {
+	log.Info().Str("query", q).Msg("searching Google Books")
 	apiURL := fmt.Sprintf(
 		"https://www.googleapis.com/books/v1/volumes?q=%s&key=%s&maxResults=10",
 		url.QueryEscape(q),
 		url.QueryEscape(apiKey),
 	)
-	resp, err := http.Get(apiURL) //nolint:noctx,gosec
+	resp, err := metadataClient.Get(apiURL) //nolint:noctx,gosec
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +343,7 @@ func fetchGoogleBooks(q, apiKey string) ([]BookMetadataResult, error) {
 		return nil, err
 	}
 
+	log.Info().Str("query", q).Int("results", len(payload.Items)).Msg("Google Books search complete")
 	results := make([]BookMetadataResult, 0, len(payload.Items))
 	for _, item := range payload.Items {
 		vi := item.VolumeInfo
@@ -303,6 +377,65 @@ func fetchGoogleBooks(q, apiKey string) ([]BookMetadataResult, error) {
 		}
 		if thumb := vi.ImageLinks.Thumbnail; thumb != "" {
 			r.CoverURL = strings.Replace(thumb, "http://", "https://", 1)
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// fetchBookBrainz calls the BookBrainz search API and returns normalised results.
+// BookBrainz does not provide cover images.
+func fetchBookBrainz(q string) ([]BookMetadataResult, error) {
+	log.Debug().Str("query", q).Msg("searching BookBrainz")
+	apiURL := fmt.Sprintf(
+		"https://api.bookbrainz.org/1/search?q=%s&type=edition&size=10",
+		url.QueryEscape(q),
+	)
+	resp, err := metadataClient.Get(apiURL) //nolint:noctx,gosec
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bookbrainz returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload struct {
+		Results []struct {
+			BBID         string `json:"bbid"`
+			DefaultAlias struct {
+				Name string `json:"name"`
+			} `json:"default-alias"`
+			AuthorCredit struct {
+				Names []struct {
+					Name string `json:"name"`
+				} `json:"names"`
+			} `json:"author-credit"`
+		} `json:"search-results"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+
+	log.Debug().Str("query", q).Int("results", len(payload.Results)).Msg("BookBrainz search complete")
+	results := make([]BookMetadataResult, 0, len(payload.Results))
+	for _, item := range payload.Results {
+		if item.DefaultAlias.Name == "" {
+			continue
+		}
+		r := BookMetadataResult{
+			Source:       "bookbrainz",
+			Title:        item.DefaultAlias.Name,
+			BookBrainzID: item.BBID,
+		}
+		if len(item.AuthorCredit.Names) > 0 {
+			r.Author = item.AuthorCredit.Names[0].Name
 		}
 		results = append(results, r)
 	}

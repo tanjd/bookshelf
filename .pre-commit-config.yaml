@@ -52,6 +52,13 @@ repos:
         types: [go]
         pass_filenames: false
 
+      - id: eslint
+        name: eslint (frontend)
+        entry: bash -c 'cd frontend && npm run lint'
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+        pass_filenames: false
+
   # Conventional commits validation
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v3.6.0

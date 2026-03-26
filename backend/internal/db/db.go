@@ -7,13 +7,13 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/rs/zerolog/log"
 	"github.com/tanjd/bookshelf/internal/models"
 	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -70,7 +70,7 @@ func runMigrations(sqlDB *sql.DB) error {
 		return err
 	}
 
-	slog.Info("database schema up to date")
+	log.Info().Msg("database schema up to date")
 	return nil
 }
 
@@ -107,7 +107,7 @@ func ensureBaseline(sqlDB *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("ensureBaseline: %w", err)
 	}
-	slog.Info("migration baseline set for existing database", "version", 7)
+	log.Info().Int("version", 7).Msg("migration baseline set for existing database")
 	return nil
 }
 
@@ -119,6 +119,8 @@ func Seed(database *gorm.DB) {
 		{Key: "require_verified_to_borrow", Value: "false"},
 		{Key: "max_active_loans", Value: "0"},
 		{Key: "cover_refresh_interval", Value: "24h"},
+		{Key: "verification_requires_phone", Value: "false"},
+		{Key: "verification_min_books_shared", Value: "0"},
 	}
 	for _, s := range defaults {
 		database.Where(models.AppSetting{Key: s.Key}).FirstOrCreate(&s)

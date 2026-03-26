@@ -4,8 +4,10 @@ export interface User {
   email: string
   phone: string
   verified: boolean
+  suspended: boolean
   role: 'user' | 'admin'
   created_at: string
+  google_books_key_configured: boolean
 }
 
 export interface AppSetting {
@@ -41,6 +43,7 @@ export interface Copy {
   status: 'available' | 'requested' | 'loaned' | 'unavailable'
   auto_approve?: boolean
   return_date_required?: boolean
+  hide_owner?: boolean
   book?: Book
   owner?: { id: number; name: string; email?: string; phone?: string }
 }
@@ -113,7 +116,7 @@ export interface AuthResponse {
 
 // Normalised metadata search result (from backend proxy)
 export interface BookMetadataResult {
-  source: 'openlibrary' | 'google_books'
+  source: 'openlibrary' | 'google_books' | 'bookbrainz'
   title: string
   author: string
   isbn: string
@@ -125,4 +128,27 @@ export interface BookMetadataResult {
   language: string
   ol_key: string
   google_books_id: string
+  bookbrainz_id?: string
+}
+
+export interface VerificationFactor {
+  key: 'email' | 'phone' | 'min_books_shared'
+  label: string
+  required: boolean
+  satisfied: boolean
+  target?: number
+  current?: number
+}
+
+export interface VerificationStatus {
+  eligible: boolean
+  factors: VerificationFactor[]
+}
+
+export interface MetadataProviderStatus {
+  name: string
+  enabled: boolean
+  reachable: boolean
+  latency_ms: number
+  error?: string
 }

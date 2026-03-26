@@ -7,12 +7,14 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"log/slog"
+
 	"math/big"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
@@ -52,14 +54,17 @@ func validatePasswordComplexity(p string) string {
 
 // AuthHandler holds dependencies for authentication routes.
 type AuthHandler struct {
-	users     repository.UserRepository
-	jwtSecret string
-	email     *services.EmailService
+	users            repository.UserRepository
+	admin            repository.AdminRepository
+	copies           repository.CopyRepository
+	jwtSecret        string
+	encryptionSecret string
+	email            *services.EmailService
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(users repository.UserRepository, jwtSecret string, email *services.EmailService) *AuthHandler {
-	return &AuthHandler{users: users, jwtSecret: jwtSecret, email: email}
+func NewAuthHandler(users repository.UserRepository, admin repository.AdminRepository, copies repository.CopyRepository, jwtSecret, encryptionSecret string, email *services.EmailService) *AuthHandler {
+	return &AuthHandler{users: users, admin: admin, copies: copies, jwtSecret: jwtSecret, encryptionSecret: encryptionSecret, email: email}
 }
 
 // --- Input / Output types ---
@@ -86,13 +91,32 @@ type authResponse struct {
 
 type authOutput struct{ Body authResponse }
 
-type meOutput struct{ Body models.User }
+type meBody struct {
+	models.User
+	GoogleBooksKeyConfigured bool `json:"google_books_key_configured"`
+}
+
+type meOutput struct{ Body meBody }
 
 type updateMeInput struct {
 	Body struct {
-		Name  *string `json:"name,omitempty" doc:"New display name"`
-		Phone *string `json:"phone,omitempty" doc:"Contact phone number"`
-		Email *string `json:"email,omitempty" format:"email" doc:"New email address"`
+		Name              *string `json:"name,omitempty" doc:"New display name"`
+		Phone             *string `json:"phone,omitempty" doc:"Contact phone number"`
+		Email             *string `json:"email,omitempty" format:"email" doc:"New email address"`
+		GoogleBooksAPIKey *string `json:"google_books_api_key,omitempty" doc:"Your Google Books API key. Set to empty string to remove."`
+	}
+}
+
+type testGoogleBooksKeyInput struct {
+	Body struct {
+		Key string `json:"key,omitempty" doc:"Key to test. Omit to test the currently stored key."`
+	}
+}
+
+type testGoogleBooksKeyOutput struct {
+	Body struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message,omitempty"`
 	}
 }
 
@@ -123,6 +147,22 @@ type changePasswordInput struct {
 		CurrentPassword string `json:"current_password" required:"true" minLength:"1" doc:"Current password"`
 		NewPassword     string `json:"new_password" required:"true" minLength:"8" doc:"New password (min 8 chars, mixed case + digit)"`
 		ConfirmPassword string `json:"confirm_password" required:"true" minLength:"1" doc:"Must match new_password"`
+	}
+}
+
+type verificationFactor struct {
+	Key       string `json:"key" doc:"Factor identifier: email, phone, or min_books_shared"`
+	Label     string `json:"label" doc:"Human-readable description"`
+	Required  bool   `json:"required"`
+	Satisfied bool   `json:"satisfied"`
+	Target    *int64 `json:"target,omitempty" doc:"Required count (min_books_shared only)"`
+	Current   *int64 `json:"current,omitempty" doc:"User's current count (min_books_shared only)"`
+}
+
+type verificationStatusOutput struct {
+	Body struct {
+		Eligible bool                 `json:"eligible" doc:"True when all required factors are satisfied"`
+		Factors  []verificationFactor `json:"factors" doc:"Status of each configured verification requirement"`
 	}
 }
 
@@ -208,11 +248,32 @@ func (h *AuthHandler) RegisterRoutes(api huma.API) {
 		Summary:     "Change the authenticated user's password",
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, h.changePassword)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "test-google-books-key",
+		Method:      "POST",
+		Path:        "/auth/me/google-books-key/test",
+		Tags:        []string{"auth"},
+		Summary:     "Test a Google Books API key. Pass a key in the body to test it directly, or omit to test the currently stored key.",
+		Security:    []map[string][]string{{"bearer": {}}},
+	}, h.testGoogleBooksKey)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-verification-status",
+		Method:      "GET",
+		Path:        "/auth/me/verification-status",
+		Tags:        []string{"auth"},
+		Summary:     "Get the authenticated user's verification status against the current admin-configured requirements",
+		Security:    []map[string][]string{{"bearer": {}}},
+	}, h.verificationStatus)
 }
 
 // --- Handlers ---
 
 func (h *AuthHandler) register(_ context.Context, input *registerInput) (*authOutput, error) {
+	if val, _ := h.admin.GetSetting("allow_registration"); val == "false" {
+		return nil, huma.Error403Forbidden("registration is currently disabled")
+	}
 	if input.Body.Name == "" || input.Body.Email == "" || input.Body.Password == "" {
 		return nil, huma.Error400BadRequest("name, email and password are required")
 	}
@@ -252,6 +313,10 @@ func (h *AuthHandler) login(_ context.Context, input *loginInput) (*authOutput, 
 		return nil, huma.Error401Unauthorized("invalid credentials")
 	}
 
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
+	}
+
 	token, err := h.issueToken(user.ID, user.Role)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not issue token")
@@ -274,7 +339,11 @@ func (h *AuthHandler) me(ctx context.Context, _ *struct{}) (*meOutput, error) {
 		return nil, huma.Error500InternalServerError("could not fetch user")
 	}
 
-	return &meOutput{Body: *user}, nil
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
+	}
+
+	return &meOutput{Body: meBody{User: *user, GoogleBooksKeyConfigured: user.GoogleBooksAPIKey != ""}}, nil
 }
 
 func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOutput, error) {
@@ -289,6 +358,10 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 			return nil, huma.Error404NotFound("user not found")
 		}
 		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
 	}
 
 	if input.Body.Name != nil {
@@ -309,11 +382,58 @@ func (h *AuthHandler) updateMe(ctx context.Context, input *updateMeInput) (*meOu
 		user.OTPExpiry = nil
 	}
 
+	if input.Body.GoogleBooksAPIKey != nil {
+		if *input.Body.GoogleBooksAPIKey == "" {
+			user.GoogleBooksAPIKey = ""
+		} else {
+			encrypted, err := encryptField(*input.Body.GoogleBooksAPIKey, h.encryptionSecret)
+			if err != nil {
+				return nil, huma.Error500InternalServerError("could not save API key")
+			}
+			user.GoogleBooksAPIKey = encrypted
+		}
+	}
+
 	if err := h.users.Save(user); err != nil {
 		return nil, huma.Error500InternalServerError("could not update user")
 	}
 
-	return &meOutput{Body: *user}, nil
+	return &meOutput{Body: meBody{User: *user, GoogleBooksKeyConfigured: user.GoogleBooksAPIKey != ""}}, nil
+}
+
+func (h *AuthHandler) testGoogleBooksKey(ctx context.Context, input *testGoogleBooksKeyInput) (*testGoogleBooksKeyOutput, error) {
+	userID, err := middleware.GetRequiredUserID(ctx)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("authentication required")
+	}
+
+	key := input.Body.Key
+	if key == "" {
+		user, err := h.users.FindByID(userID)
+		if err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return nil, huma.Error404NotFound("user not found")
+			}
+			return nil, huma.Error500InternalServerError("could not fetch user")
+		}
+		if user.GoogleBooksAPIKey == "" {
+			return nil, huma.Error400BadRequest("no Google Books API key configured")
+		}
+		decrypted, err := decryptField(user.GoogleBooksAPIKey, h.encryptionSecret)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("could not read stored key")
+		}
+		key = decrypted
+	}
+
+	out := &testGoogleBooksKeyOutput{}
+	if err := validateGoogleBooksAPIKey(key); err != nil {
+		out.Body.OK = false
+		out.Body.Message = err.Error()
+	} else {
+		out.Body.OK = true
+	}
+	return out, nil
 }
 
 func (h *AuthHandler) setupStatus(_ context.Context, _ *struct{}) (*setupStatusOutput, error) {
@@ -373,6 +493,10 @@ func (h *AuthHandler) sendOTP(ctx context.Context, _ *sendOTPInput) (*struct{}, 
 		return nil, huma.Error500InternalServerError("could not fetch user")
 	}
 
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
+	}
+
 	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not generate OTP")
@@ -392,7 +516,7 @@ func (h *AuthHandler) sendOTP(ctx context.Context, _ *sendOTPInput) (*struct{}, 
 	)
 	if err := h.email.SendEmail(user.Email, "Your Bookshelf verification code", html); err != nil {
 		// Log but don't fail — user can retry.
-		slog.WarnContext(ctx, "sendOTP: email delivery failed", "user_id", userID, "error", err)
+		log.Warn().Err(err).Uint("user_id", userID).Msg("sendOTP: email delivery failed")
 	}
 
 	return nil, nil
@@ -407,6 +531,10 @@ func (h *AuthHandler) verifyOTP(ctx context.Context, input *verifyOTPInput) (*me
 	user, err := h.users.FindByID(userID)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
 	}
 
 	if user.OTPCode == "" || user.OTPExpiry == nil {
@@ -431,7 +559,7 @@ func (h *AuthHandler) verifyOTP(ctx context.Context, input *verifyOTPInput) (*me
 		return nil, huma.Error500InternalServerError("could not update user")
 	}
 
-	return &meOutput{Body: *user}, nil
+	return &meOutput{Body: meBody{User: *user, GoogleBooksKeyConfigured: user.GoogleBooksAPIKey != ""}}, nil
 }
 
 func (h *AuthHandler) changePassword(ctx context.Context, input *changePasswordInput) (*struct{}, error) {
@@ -446,6 +574,10 @@ func (h *AuthHandler) changePassword(ctx context.Context, input *changePasswordI
 			return nil, huma.Error404NotFound("user not found")
 		}
 		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	if user.Suspended {
+		return nil, huma.Error403Forbidden("this account has been suspended")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Body.CurrentPassword)); err != nil {
@@ -470,8 +602,77 @@ func (h *AuthHandler) changePassword(ctx context.Context, input *changePasswordI
 		return nil, huma.Error500InternalServerError("could not update password")
 	}
 
-	slog.Info("password changed", "user_id", userID)
+	log.Info().Uint("user_id", userID).Msg("password changed")
 	return nil, nil
+}
+
+func (h *AuthHandler) verificationStatus(ctx context.Context, _ *struct{}) (*verificationStatusOutput, error) {
+	userID, err := middleware.GetRequiredUserID(ctx)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("authentication required")
+	}
+
+	user, err := h.users.FindByID(userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, huma.Error404NotFound("user not found")
+		}
+		return nil, huma.Error500InternalServerError("could not fetch user")
+	}
+
+	var factors []verificationFactor
+	eligible := true
+
+	if val, _ := h.admin.GetSetting("require_verified_to_borrow"); val == "true" {
+		satisfied := user.Verified
+		factors = append(factors, verificationFactor{
+			Key:       "email",
+			Label:     "Verified email address",
+			Required:  true,
+			Satisfied: satisfied,
+		})
+		if !satisfied {
+			eligible = false
+		}
+	}
+
+	if val, _ := h.admin.GetSetting("verification_requires_phone"); val == "true" {
+		satisfied := user.Phone != ""
+		factors = append(factors, verificationFactor{
+			Key:       "phone",
+			Label:     "Phone number on file",
+			Required:  true,
+			Satisfied: satisfied,
+		})
+		if !satisfied {
+			eligible = false
+		}
+	}
+
+	if minStr, _ := h.admin.GetSetting("verification_min_books_shared"); minStr != "" && minStr != "0" {
+		var target int64
+		if _, scanErr := fmt.Sscanf(minStr, "%d", &target); scanErr == nil && target > 0 {
+			current, _ := h.copies.CountByOwnerID(userID)
+			satisfied := current >= target
+			label := fmt.Sprintf("Share at least %d book(s)", target)
+			factors = append(factors, verificationFactor{
+				Key:       "min_books_shared",
+				Label:     label,
+				Required:  true,
+				Satisfied: satisfied,
+				Target:    &target,
+				Current:   &current,
+			})
+			if !satisfied {
+				eligible = false
+			}
+		}
+	}
+
+	out := &verificationStatusOutput{}
+	out.Body.Eligible = eligible
+	out.Body.Factors = factors
+	return out, nil
 }
 
 // issueToken creates a signed HS256 JWT for the given user with a 24-hour expiry.

@@ -3,16 +3,19 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/joho/godotenv"
 	"github.com/rs/cors"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/tanjd/bookshelf/internal/config"
 	"github.com/tanjd/bookshelf/internal/db"
@@ -26,18 +29,43 @@ import (
 var version = "dev"
 
 func main() {
+	// Load .env if present. No-op in production where vars are injected by the runtime.
+	_ = godotenv.Load()
+
 	cfg := config.Load()
+
+	// Configure logger: pretty console output in dev, structured JSON in production.
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	if cfg.Env != "prd" {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+	}
+
+	// Log startup configuration — show intent without leaking secret values.
+	log.Info().
+		Str("version", version).
+		Str("env", cfg.Env).
+		Str("port", cfg.Port).
+		Str("db_path", cfg.DBPath).
+		Str("cors_origins", strings.Join(cfg.CORSOrigins, ", ")).
+		Bool("email_enabled", cfg.ResendAPIKey != "").
+		Str("email_from", cfg.EmailFrom).
+		Bool("google_books_enabled", cfg.GoogleBooksAPIKey != "").
+		Str("metadata_refresh_interval", cfg.MetadataRefreshInterval).
+		Msg("bookshelf starting")
+	if cfg.JWTSecret == "dev-secret-change-me" {
+		log.Warn().Msg("JWT_SECRET is set to the default value — change it before deploying to production")
+	}
 
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
-		panic("failed to open database: " + err.Error())
+		log.Fatal().Err(err).Msg("failed to open database")
 	}
 
 	db.Seed(database)
 
 	coversDir := "./data/covers"
 	if err := os.MkdirAll(coversDir, 0o750); err != nil {
-		panic("failed to create covers dir: " + err.Error())
+		log.Fatal().Err(err).Msg("failed to create covers dir")
 	}
 
 	// Repositories — only this layer and db.Open ever import gorm.io/gorm.
@@ -50,18 +78,41 @@ func main() {
 	waitlistRepo := gormrepo.NewWaitlistRepository(database)
 
 	// Services
-	emailSvc := services.NewEmailService(cfg.ResendAPIKey, cfg.EmailFrom)
+	emailSvc := services.NewEmailService(cfg.ResendAPIKey, cfg.EmailFrom, cfg.Env, cfg.DevEmailOverride)
 	workflow := services.NewLoanWorkflow(copyRepo, loanRepo, notifRepo, userRepo, waitlistRepo, emailSvc)
 	scheduler := services.NewScheduler(bookRepo, adminRepo, coversDir, cfg.MetadataRefreshInterval)
 
+	// Seed settings from bookshelf.yaml if it exists (YAML values override DB defaults).
+	if kvs, yamlErr := handlers.LoadYAMLConfig(cfg.AppConfigPath); yamlErr != nil {
+		log.Warn().Err(yamlErr).Str("path", cfg.AppConfigPath).Msg("could not parse bookshelf.yaml — using DB defaults")
+	} else if len(kvs) > 0 {
+		for k, v := range kvs {
+			if upsertErr := adminRepo.UpsertSetting(k, v); upsertErr != nil {
+				log.Warn().Err(upsertErr).Str("key", k).Msg("could not apply YAML setting")
+			}
+		}
+		log.Info().Str("path", cfg.AppConfigPath).Int("keys", len(kvs)).Msg("seeded settings from YAML")
+	}
+
+	// Create the root context early so it can be passed to handlers that run
+	// background goroutines (e.g. the metadata cache eviction loop).
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Resolve encryption secret: use ENCRYPTION_SECRET if set, otherwise fall
+	// back to JWT_SECRET so existing deployments keep working unchanged.
+	encryptionSecret := cfg.EncryptionSecret
+	if encryptionSecret == "" {
+		encryptionSecret = cfg.JWTSecret
+	}
+
 	// Handlers
-	authH := handlers.NewAuthHandler(userRepo, cfg.JWTSecret, emailSvc)
-	metadataH := handlers.NewMetadataHandler(cfg.GoogleBooksAPIKey)
-	bookH := handlers.NewBookHandler(bookRepo, coversDir)
-	copyH := handlers.NewCopyHandler(copyRepo, userRepo, notifRepo, waitlistRepo)
-	loanH := handlers.NewLoanRequestHandler(copyRepo, loanRepo, adminRepo, workflow)
+	authH := handlers.NewAuthHandler(userRepo, adminRepo, copyRepo, cfg.JWTSecret, encryptionSecret, emailSvc)
+	metadataH := handlers.NewMetadataHandler(cfg.GoogleBooksAPIKey, encryptionSecret, userRepo, ctx)
+	bookH := handlers.NewBookHandler(bookRepo, userRepo, coversDir)
+	copyH := handlers.NewCopyHandler(copyRepo, userRepo, notifRepo, waitlistRepo, adminRepo)
+	loanH := handlers.NewLoanRequestHandler(copyRepo, loanRepo, adminRepo, userRepo, workflow)
 	notifH := handlers.NewNotificationHandler(notifRepo)
-	adminH := handlers.NewAdminHandler(adminRepo)
+	adminH := handlers.NewAdminHandler(adminRepo, cfg.GoogleBooksAPIKey)
 	jobsH := handlers.NewJobsHandler(scheduler)
 	waitlistH := handlers.NewWaitlistHandler(copyRepo, waitlistRepo)
 
@@ -122,8 +173,6 @@ func main() {
 	}
 
 	// Start the background scheduler.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	go scheduler.Start(ctx)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
@@ -131,17 +180,18 @@ func main() {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
-		slog.Info("shutting down server")
+		log.Info().Msg("shutting down server")
 		cancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutCancel()
 		if shutErr := srv.Shutdown(shutCtx); shutErr != nil {
-			slog.Error("server shutdown error", "error", shutErr)
+			log.Error().Err(shutErr).Msg("server shutdown error")
 		}
 	}()
 
-	slog.Info("bookshelf API starting", "port", cfg.Port)
+	log.Info().Str("port", cfg.Port).Msg("listening")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		panic("server failed: " + err.Error())
+		cancel()
+		log.Fatal().Err(err).Msg("server failed")
 	}
 }

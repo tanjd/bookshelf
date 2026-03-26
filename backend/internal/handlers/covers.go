@@ -4,13 +4,14 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // coverMaxBytes is the maximum size accepted for a downloaded cover image (10 MiB).
@@ -107,6 +108,6 @@ func downloadCover(externalURL, destDir string) (string, error) {
 		return "", err
 	}
 
-	slog.Info("cover cached", "filename", filename)
+	log.Info().Str("filename", filename).Msg("cover cached")
 	return "/api/covers/" + filename, nil
 }

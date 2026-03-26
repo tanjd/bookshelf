@@ -3,17 +3,8 @@
 .env.*
 !.env.example
 *.pem
-
-# Python
-backend/.venv
-backend/__pycache__
-backend/**/__pycache__
-**/*.pyc
-**/*.pyo
-backend/.pytest_cache
-backend/.ruff_cache
-backend/.mypy_cache
-backend/*.egg-info/
+data/
+*.db
 
 # Node / Next.js
 frontend/node_modules
@@ -36,8 +27,11 @@ frontend/.cache
 Makefile
 docker-compose*.yml
 Dockerfile*
+.github/
+todo.md
+.pre-commit-config.yaml
+.releaserc.json
 
-# Test and build artifacts
-backend/tests/
+# Build artifacts
 dist/
 build/

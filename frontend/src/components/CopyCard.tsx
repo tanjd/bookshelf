@@ -46,11 +46,14 @@ export function CopyCard({ copy, actions }: CopyCardProps) {
           <Badge variant={statusVariant[copy.status]}>
             {statusLabel[copy.status]}
           </Badge>
-          {copy.owner && (
-            <span className="text-sm text-muted-foreground">
-              Shared by <span className="font-medium text-foreground">{copy.owner.name}</span>
-            </span>
-          )}
+          {copy.hide_owner
+            ? <span className="text-sm text-muted-foreground">Anonymous member</span>
+            : copy.owner?.name
+              ? <span className="text-sm text-muted-foreground">
+                  Shared by <span className="font-medium text-foreground">{copy.owner.name}</span>
+                </span>
+              : <span className="text-sm text-muted-foreground">Sign in and verify to see who&apos;s sharing</span>
+          }
         </div>
         {copy.notes && (
           <p className="text-sm text-muted-foreground italic">{copy.notes}</p>

@@ -3,9 +3,11 @@ package handlers
 import (
 	"context"
 	"errors"
-	"log/slog"
+	"fmt"
 
 	"github.com/danielgtaylor/huma/v2"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/tanjd/bookshelf/internal/middleware"
 	"github.com/tanjd/bookshelf/internal/models"
@@ -18,6 +20,7 @@ type CopyHandler struct {
 	users     repository.UserRepository
 	notifs    repository.NotificationRepository
 	waitlists repository.WaitlistRepository
+	admin     repository.AdminRepository
 }
 
 // NewCopyHandler creates a new CopyHandler.
@@ -26,8 +29,9 @@ func NewCopyHandler(
 	users repository.UserRepository,
 	notifs repository.NotificationRepository,
 	waitlists repository.WaitlistRepository,
+	admin repository.AdminRepository,
 ) *CopyHandler {
-	return &CopyHandler{copies: copies, users: users, notifs: notifs, waitlists: waitlists}
+	return &CopyHandler{copies: copies, users: users, notifs: notifs, waitlists: waitlists, admin: admin}
 }
 
 // --- Input / Output types ---
@@ -39,6 +43,7 @@ type createCopyInput struct {
 		Notes              string `json:"notes,omitempty" doc:"Optional notes visible to borrowers"`
 		AutoApprove        *bool  `json:"auto_approve,omitempty" doc:"Automatically accept the first request"`
 		ReturnDateRequired *bool  `json:"return_date_required,omitempty" doc:"Require borrower to provide an expected return date"`
+		HideOwner          *bool  `json:"hide_owner,omitempty" doc:"Hide your identity from borrowers (shown as anonymous)"`
 	}
 }
 
@@ -52,6 +57,7 @@ type updateCopyInput struct {
 		Status             *string `json:"status,omitempty" doc:"Status: available or unavailable"`
 		AutoApprove        *bool   `json:"auto_approve,omitempty" doc:"Automatically accept the first request"`
 		ReturnDateRequired *bool   `json:"return_date_required,omitempty" doc:"Require borrower to provide an expected return date"`
+		HideOwner          *bool   `json:"hide_owner,omitempty" doc:"Hide your identity from borrowers (shown as anonymous)"`
 	}
 }
 
@@ -144,6 +150,19 @@ func (h *CopyHandler) createCopy(ctx context.Context, input *createCopyInput) (*
 		return nil, huma.Error401Unauthorized("authentication required")
 	}
 
+	// Enforce max_copies_per_user (0 = unlimited).
+	if maxStr, err := h.admin.GetSetting("max_copies_per_user"); err == nil && maxStr != "" && maxStr != "0" {
+		var maxCopies int64
+		if _, scanErr := fmt.Sscanf(maxStr, "%d", &maxCopies); scanErr == nil && maxCopies > 0 {
+			count, countErr := h.copies.CountByOwnerID(ownerID)
+			if countErr == nil && count >= maxCopies {
+				return nil, huma.Error422UnprocessableEntity(
+					fmt.Sprintf("you have reached the maximum of %d shared copy/copies", maxCopies),
+				)
+			}
+		}
+	}
+
 	bookCopy := models.Copy{
 		BookID:    input.Body.BookID,
 		OwnerID:   ownerID,
@@ -156,6 +175,9 @@ func (h *CopyHandler) createCopy(ctx context.Context, input *createCopyInput) (*
 	}
 	if input.Body.ReturnDateRequired != nil {
 		bookCopy.ReturnDateRequired = *input.Body.ReturnDateRequired
+	}
+	if input.Body.HideOwner != nil {
+		bookCopy.HideOwner = *input.Body.HideOwner
 	}
 	if err := h.copies.Create(&bookCopy); err != nil {
 		return nil, huma.Error500InternalServerError("could not create copy")
@@ -208,6 +230,9 @@ func (h *CopyHandler) updateCopy(ctx context.Context, input *updateCopyInput) (*
 	}
 	if input.Body.ReturnDateRequired != nil {
 		bookCopy.ReturnDateRequired = *input.Body.ReturnDateRequired
+	}
+	if input.Body.HideOwner != nil {
+		bookCopy.HideOwner = *input.Body.HideOwner
 	}
 
 	if err := h.copies.Save(bookCopy); err != nil {
@@ -290,10 +315,10 @@ func (h *CopyHandler) transferCopy(ctx context.Context, input *transferCopyInput
 	outN := models.Notification{RecipientID: prevOwnerID, Type: "copy_transferred_out"}
 	inN := models.Notification{RecipientID: target.ID, Type: "copy_transferred_in"}
 	if notifErr := h.notifs.Create(&outN); notifErr != nil {
-		slog.WarnContext(ctx, "transfer out notification failed", "error", notifErr)
+		log.Warn().Err(notifErr).Msg("transfer out notification failed")
 	}
 	if notifErr := h.notifs.Create(&inN); notifErr != nil {
-		slog.WarnContext(ctx, "transfer in notification failed", "error", notifErr)
+		log.Warn().Err(notifErr).Msg("transfer in notification failed")
 	}
 
 	// Clear waitlist since ownership changed.
