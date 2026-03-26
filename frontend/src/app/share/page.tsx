@@ -10,6 +10,9 @@ import type { BookMetadataResult } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Switch } from "@/components/ui/switch"
 import {
   Card,
   CardHeader,
@@ -36,6 +39,12 @@ interface SelectedBook {
   pageCount: number
   language: string
 }
+
+const CONDITION_OPTIONS: { value: Condition; label: string; description: string }[] = [
+  { value: 'good',  label: 'Good',  description: 'Like new or minimal wear' },
+  { value: 'fair',  label: 'Fair',  description: 'Some wear, fully readable' },
+  { value: 'worn',  label: 'Worn',  description: 'Heavy wear but intact' },
+]
 
 export default function SharePage() {
   const router = useRouter()
@@ -199,12 +208,6 @@ export default function SharePage() {
     }
   }
 
-  const conditionOptions: { value: Condition; label: string }[] = [
-    { value: 'good', label: 'Good — like new or minimal wear' },
-    { value: 'fair', label: 'Fair — some wear, fully readable' },
-    { value: 'worn', label: 'Worn — heavy wear but intact' },
-  ]
-
   // --- Render ---
   if (step === 'manual') {
     return (
@@ -251,50 +254,32 @@ export default function SharePage() {
             />
           </div>
 
-          <ConditionSelector
-            value={manualCondition}
-            onChange={setManualCondition}
-            options={conditionOptions}
-          />
+          <Separator />
 
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium">Notes (optional)</label>
-            <textarea
-              className="flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none resize-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-              placeholder="Any notes about your copy…"
-              value={manualNotes}
-              onChange={(e) => setManualNotes(e.target.value)}
-            />
-          </div>
+          <div>
+            <p className="text-sm font-medium mb-3">Your copy</p>
+            <div className="flex flex-col gap-4">
+              <ConditionPicker value={manualCondition} onChange={setManualCondition} />
 
-          <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={manualAutoApprove}
-                onChange={(e) => setManualAutoApprove(e.target.checked)}
-                className="accent-primary"
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium">Notes <span className="text-muted-foreground font-normal">(optional)</span></label>
+                <textarea
+                  className="flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none resize-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  placeholder="Any notes about your copy…"
+                  value={manualNotes}
+                  onChange={(e) => setManualNotes(e.target.value)}
+                />
+              </div>
+
+              <CopySettings
+                autoApprove={manualAutoApprove}
+                returnDateRequired={manualReturnDateRequired}
+                hideOwner={manualHideOwner}
+                onAutoApproveChange={setManualAutoApprove}
+                onReturnDateRequiredChange={setManualReturnDateRequired}
+                onHideOwnerChange={setManualHideOwner}
               />
-              <span className="text-sm">Auto-approve if available</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={manualReturnDateRequired}
-                onChange={(e) => setManualReturnDateRequired(e.target.checked)}
-                className="accent-primary"
-              />
-              <span className="text-sm">Require return date from borrower</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={manualHideOwner}
-                onChange={(e) => setManualHideOwner(e.target.checked)}
-                className="accent-primary"
-              />
-              <span className="text-sm">Keep me anonymous (hide my name from borrowers)</span>
-            </label>
+            </div>
           </div>
 
           <Button onClick={handleManualSubmit} disabled={manualSubmitting}>
@@ -307,6 +292,14 @@ export default function SharePage() {
   }
 
   if (step === 'confirm' && selected) {
+    const metaChips = [
+      selected.isbn && `ISBN ${selected.isbn}`,
+      selected.publisher && (selected.publishedDate ? `${selected.publisher}, ${selected.publishedDate}` : selected.publisher),
+      !selected.publisher && selected.publishedDate,
+      selected.pageCount > 0 && `${selected.pageCount} pages`,
+      selected.language && selected.language.toUpperCase(),
+    ].filter(Boolean) as string[]
+
     return (
       <div className="flex flex-col gap-6 max-w-lg mx-auto">
         <Button
@@ -325,8 +318,9 @@ export default function SharePage() {
           </p>
         </div>
 
+        {/* Book preview */}
         <Card>
-          <CardHeader className="flex-row gap-4 items-start pb-0">
+          <CardHeader className="flex-row gap-4 items-start pb-3">
             {selected.coverUrl && (
               <div className="relative w-20 aspect-[2/3] rounded overflow-hidden shrink-0 bg-muted">
                 <Image
@@ -338,44 +332,46 @@ export default function SharePage() {
                 />
               </div>
             )}
-            <div className="flex flex-col gap-1 min-w-0">
+            <div className="flex flex-col gap-1.5 min-w-0 flex-1">
               <CardTitle className="text-base leading-snug">{selected.title}</CardTitle>
               {selected.author && (
                 <CardDescription>{selected.author}</CardDescription>
               )}
-              {selected.isbn && (
-                <p className="text-xs text-muted-foreground">ISBN: {selected.isbn}</p>
-              )}
-              {selected.publisher && (
-                <p className="text-xs text-muted-foreground">{selected.publisher}{selected.publishedDate ? `, ${selected.publishedDate}` : ''}</p>
-              )}
-              {(selected.pageCount > 0 || selected.language) && (
+              {metaChips.length > 0 && (
                 <p className="text-xs text-muted-foreground">
-                  {selected.pageCount > 0 ? `${selected.pageCount} pages` : ''}
-                  {selected.pageCount > 0 && selected.language ? ' · ' : ''}
-                  {selected.language ? selected.language.toUpperCase() : ''}
+                  {metaChips.join(' · ')}
                 </p>
               )}
             </div>
           </CardHeader>
           {selected.description && (
-            <CardContent className="pt-4">
+            <CardContent className="pt-0">
               <p className="text-sm text-muted-foreground line-clamp-4">
                 {selected.description}
               </p>
             </CardContent>
           )}
+          <div className="px-6 pb-4">
+            <button
+              onClick={() => setStep('search')}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Not the right edition? Go back →
+            </button>
+          </div>
         </Card>
 
+        {/* Copy settings */}
         <div className="flex flex-col gap-4">
-          <ConditionSelector
-            value={condition}
-            onChange={setCondition}
-            options={conditionOptions}
-          />
+          <div>
+            <p className="text-sm font-semibold">Your copy</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Describe the physical copy you&apos;re sharing</p>
+          </div>
+
+          <ConditionPicker value={condition} onChange={setCondition} />
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium">Notes (optional)</label>
+            <label className="text-sm font-medium">Notes <span className="text-muted-foreground font-normal">(optional)</span></label>
             <textarea
               className="flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none resize-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
               placeholder="e.g. spine slightly creased, all pages intact…"
@@ -384,35 +380,14 @@ export default function SharePage() {
             />
           </div>
 
-          <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoApprove}
-                onChange={(e) => setAutoApprove(e.target.checked)}
-                className="accent-primary"
-              />
-              <span className="text-sm">Auto-approve if available</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={returnDateRequired}
-                onChange={(e) => setReturnDateRequired(e.target.checked)}
-                className="accent-primary"
-              />
-              <span className="text-sm">Require return date from borrower</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={hideOwner}
-                onChange={(e) => setHideOwner(e.target.checked)}
-                className="accent-primary"
-              />
-              <span className="text-sm">Keep me anonymous (hide my name from borrowers)</span>
-            </label>
-          </div>
+          <CopySettings
+            autoApprove={autoApprove}
+            returnDateRequired={returnDateRequired}
+            hideOwner={hideOwner}
+            onAutoApproveChange={setAutoApprove}
+            onReturnDateRequiredChange={setReturnDateRequired}
+            onHideOwnerChange={setHideOwner}
+          />
 
           <Button onClick={handleSubmitShare} disabled={submitting} size="lg">
             <BookPlus className="size-4" />
@@ -478,10 +453,20 @@ export default function SharePage() {
       )}
 
       {searching && (
-        <p className="text-sm text-muted-foreground">Searching…</p>
+        <div className="flex flex-col gap-2">
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="flex items-center gap-3 rounded-lg border p-3">
+              <Skeleton className="w-10 shrink-0 rounded" style={{ aspectRatio: '2/3' }} />
+              <div className="flex flex-col gap-1.5 flex-1">
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-3 w-1/2" />
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
-      {searchResults.length > 0 && (
+      {!searching && searchResults.length > 0 && (
         <div className="flex flex-col gap-2">
           {searchResults.map((result, idx) => (
             <button
@@ -539,37 +524,85 @@ export default function SharePage() {
   )
 }
 
-// Shared condition selector component
-function ConditionSelector({
+function ConditionPicker({
   value,
   onChange,
-  options,
 }: {
   value: Condition
   onChange: (v: Condition) => void
-  options: { value: Condition; label: string }[]
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium">Condition *</label>
-      <div className="flex flex-col gap-2">
-        {options.map((opt) => (
-          <label
+      <label className="text-sm font-medium">Condition</label>
+      <div className="flex gap-2">
+        {CONDITION_OPTIONS.map((opt) => (
+          <button
             key={opt.value}
-            className="flex items-center gap-2 cursor-pointer"
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className={`flex-1 flex flex-col items-center gap-0.5 rounded-lg border px-3 py-2.5 text-sm transition-colors ${
+              value === opt.value
+                ? 'border-primary bg-primary/5 text-primary font-medium'
+                : 'border-input text-muted-foreground hover:bg-accent hover:text-foreground'
+            }`}
           >
-            <input
-              type="radio"
-              name="condition"
-              value={opt.value}
-              checked={value === opt.value}
-              onChange={() => onChange(opt.value)}
-              className="accent-primary"
-            />
-            <span className="text-sm">{opt.label}</span>
-          </label>
+            <span className="font-medium text-sm">{opt.label}</span>
+            <span className="text-[11px] leading-tight text-center opacity-80">{opt.description}</span>
+          </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+function CopySettings({
+  autoApprove,
+  returnDateRequired,
+  hideOwner,
+  onAutoApproveChange,
+  onReturnDateRequiredChange,
+  onHideOwnerChange,
+}: {
+  autoApprove: boolean
+  returnDateRequired: boolean
+  hideOwner: boolean
+  onAutoApproveChange: (v: boolean) => void
+  onReturnDateRequiredChange: (v: boolean) => void
+  onHideOwnerChange: (v: boolean) => void
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      {[
+        {
+          id: 'auto-approve',
+          label: 'Auto-approve requests',
+          description: 'Loan requests are accepted automatically without your review',
+          checked: autoApprove,
+          onChange: onAutoApproveChange,
+        },
+        {
+          id: 'return-date',
+          label: 'Require return date',
+          description: 'Borrowers must specify when they plan to return the book',
+          checked: returnDateRequired,
+          onChange: onReturnDateRequiredChange,
+        },
+        {
+          id: 'hide-owner',
+          label: 'Stay anonymous',
+          description: 'Your name is hidden from borrowers in the catalog',
+          checked: hideOwner,
+          onChange: onHideOwnerChange,
+        },
+      ].map(({ id, label, description, checked, onChange }) => (
+        <div key={id} className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium">{label}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+          </div>
+          <Switch id={id} checked={checked} onCheckedChange={onChange} />
+        </div>
+      ))}
     </div>
   )
 }
